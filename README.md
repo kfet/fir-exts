@@ -65,3 +65,13 @@ cannot re-nag forever), unclosed items re-nag at most every 15 min, and auto-sno
 
 **Known limit:** punctuality is bounded by session liveness. A reminder due at 15:00
 with no session activity until 18:00 lands at 18:00, labelled overdue.
+
+### `extreload`
+
+One tool, `ext_reload(name)` — hot-reloads a named extension in the live session
+via `ctx.reload_extension`. Useful while iterating on another extension without
+restarting the session or nuking conversation context.
+
+Note: reload re-launches from the path the extension was **registered** at during
+session start. Moving a file on disk and reloading will not re-resolve it — that
+needs a full `/reload`.
