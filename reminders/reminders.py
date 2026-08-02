@@ -329,8 +329,13 @@ fir_ext.on("agent_start")(_hook_sweep)
             },
             "scope": {
                 "type": "string",
-                "description": "'here' (this conversation, default) or 'any' "
-                "(first live session that wakes up).",
+                "description": "'any' (DEFAULT: fires in the first live "
+                "session that wakes at/after the due time, wherever the user "
+                "shows up) or 'here' (this conversation ONLY). Use 'here' "
+                "only when the reminder is meaningless outside this thread "
+                "AND you expect to still be in it. A 'here' reminder is "
+                "silently stranded forever if the conversation is deleted or "
+                "simply not revisited by the due time.",
             },
         },
         "required": ["text", "due"],
@@ -338,8 +343,8 @@ fir_ext.on("agent_start")(_hook_sweep)
 )
 def reminder_add(args, ctx):
     due = parse_due(str(args["due"]))
-    scope = str(args.get("scope") or "here")
-    scope = _scope_here(ctx) if scope in ("here", "conv", "") else "any"
+    scope = str(args.get("scope") or "any")
+    scope = _scope_here(ctx) if scope in ("here", "conv") else "any"
     rid = "r" + uuid.uuid4().hex[:6]
     _append(
         {
