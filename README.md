@@ -75,3 +75,14 @@ restarting the session or nuking conversation context.
 Note: reload re-launches from the path the extension was **registered** at during
 session start. Moving a file on disk and reloading will not re-resolve it — that
 needs a full `/reload`.
+
+**Overlap with fir builtins (why this exists):** targeted single-extension reload
+is already an SDK API (`ctx.reload_extension`), but no *default-loaded* tool
+exposes it. `/reload` reloads everything and is session-scoped; `forge_tool`
+reloads only extensions it wrote to the global `extensions/` dir, so it cannot
+target a package extension; `reload_ext_demo` in builtin `demo.py` is equivalent
+but demo.py is opt-in (`-e demo`). `extreload` is a stopgap until fir exposes
+`reload_extension` as a default tool or `/reload <name>` — delete it then.
+
+fir enforces two constraints regardless: builtins cannot be reloaded, and an
+extension cannot reload itself (so `extreload` can never reload `extreload`).
