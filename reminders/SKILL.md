@@ -30,7 +30,7 @@ live session socket — not built, deliberately.
 
 | Tool | Use |
 |---|---|
-| `reminder_add(text, due, scope)` | `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `here` (default, this conversation) or `any` (first live session that wakes). |
+| `reminder_add(text, due, scope)` | `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `any` (**default**, first live session that wakes) or `here` (this conversation only — see the dead-letter warning below). |
 | `reminder_list(all)` | Pending for this conversation; `all=true` for done + other scopes. |
 | `reminder_done(id)` | Close it. Stops surfacing. |
 | `reminder_snooze(id, for)` | Defer: `1h`, `30m`, `9am`. |
@@ -65,10 +65,35 @@ repeatedly, say so and ask whether to close it.
 
 ## Creating one
 
-Prefer explicit scope. Default `here` keeps a reminder inside the conversation
-that created it; `any` is for things that matter regardless of where the user
-next shows up — and fires in the **first** session that wakes, exactly once.
+**Default scope is `any`, and that is usually right.** `any` fires in the first
+session that wakes at or after the due time, wherever the user shows up, exactly
+once.
+
+**`here` is a dead-letter risk — reach for it deliberately, never by habit.** A
+`here` reminder is matched by conversation id, so it is delivered *only* by a
+turn in that same conversation. If the user deletes the chat, or simply does not
+come back to it before the due time, the reminder sits `pending` forever: no
+delivery, no error, no notice. The record survives on disk and helps nobody.
+
+Use `here` only when both hold:
+
+1. the reminder is meaningless outside this thread (it refers to "the branch we
+   just discussed", with no self-contained context), **and**
+2. you have positive reason to expect the user back in this thread by then.
+
+Otherwise use `any` — and **write the text to stand alone**. It may surface in a
+conversation with none of this history, so include the repo, branch, sha, file
+path, or command needed to act on it. "Check on that thing" is useless in a
+fresh chat; "check go-sdk for v1.7.1; parked work on branch X @ sha Y" is not.
+
+Rule of thumb: if the text would still make sense pasted into a brand-new chat,
+it wants `any`.
 
 Confirm back with the resolved absolute time, not just the relative one — "in
 90m" is ambiguous to a user on a different clock; "2026-08-01 04:56 (in 1h 30m)"
-is not.
+is not. Say the scope too, so a `here` reminder's narrower reach is never a
+surprise.
+
+Also be honest about the two structural limits when they matter: delivery is
+lazy (nothing pushes — see Architecture), and the store is per-host, so a
+reminder set here will not fire through a bot on another machine.
