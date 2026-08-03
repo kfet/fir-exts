@@ -12,7 +12,8 @@ timer. The clock does not fire a reminder; **waking up does**.
 
 - **Store:** `~/.local/state/poe-acp/notes/reminders.jsonl` — append-only op log
   (`add` / `done` / `snooze` / `delivered`). jsonl is truth, memory is cache.
-- **Delivery:** the `reminders` extension sweeps on `agent_start` (turn already
+  Records replay from the log, so new fields degrade safely on old stores.
+- **Delivery:** the `reminders` extension sweeps on `turn_start` (turn already
   in flight) and steers a `[reminders]` user-role block into the live turn.
   This is the proven injection path; the turn is not aborted.
 - **No in-process timer.** `poe-acp --session-ttl` evicts idle conv sessions, so
@@ -30,7 +31,7 @@ live session socket — not built, deliberately.
 
 | Tool | Use |
 |---|---|
-| `reminder_add(text, due, scope)` | `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `any` (**default**, first live session that wakes) or `here` (this conversation only — see the dead-letter warning below). |
+| `reminder_add(text, due, scope, repeat)` | `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `any` (**default**, first live session that wakes) or `here` (this conversation only — see the dead-letter warning below). `repeat`: optional interval (`8h`, `1d`) — see [Recurring and conditional reminders](#recurring-and-conditional-reminders). |
 | `reminder_list(all)` | Pending for this conversation; `all=true` for done + other scopes. |
 | `reminder_done(id)` | Close it. Stops surfacing. |
 | `reminder_snooze(id, for)` | Defer: `1h`, `30m`, `9am`. |
@@ -62,6 +63,54 @@ A surfaced-but-unclosed reminder re-nags at most every **15 minutes**, and after
 **5 surfacings** auto-snoozes 24h with a note. This is deliberate: a reminder
 you learn to ignore is worse than no reminder. If something has been surfaced
 repeatedly, say so and ask whether to close it.
+
+An **explicit** `reminder_snooze` resets that surfacing counter — deferring
+something is a fresh start, not another nag, so a repeatedly-deferred reminder
+keeps its cadence instead of silently decaying into the 24h floor. The
+automatic 24h snooze is exempt, so the escape hatch stays terminal.
+
+A reminder with `repeat` set is outside this contract entirely: it re-arms one
+interval out every time it fires, resets its counter, and never auto-snoozes.
+It ends only at `reminder_done`.
+
+## Recurring and conditional reminders
+
+`repeat` turns a reminder into a self-re-arming loop. Two uses:
+
+**Recurring nudge** — `repeat: "1d"` for something that should keep asking
+until it is actually done.
+
+**Poll until a condition holds** — the pattern to reach for when the trigger is
+an *event you cannot subscribe to* (the user gets home, a release lands, a host
+comes back up). Do not build a daemon for this. Write the check into the
+reminder text and let the future agent run it:
+
+```
+reminder_add(
+  due="8h", repeat="8h", scope="any",
+  text="CHECK: run `tailscale status --json` and look at kfetphoneair. "
+       "HOME if CurAddr is on 192.168.50.x or relay is `sea`. "
+       "IF NOT HOME: say nothing to the user, do not call reminder_done — "
+       "this re-arms itself in 8h. "
+       "IF HOME: deliver <payload> and call reminder_done(<id>).")
+```
+
+Why this beats a background watcher: the condition is **persistent**, not a
+transient event. "Is the user home?" is still true the next time anyone looks,
+and since you only ever act on the user's turn, nothing could consume an
+arrival event sooner anyway. Continuous capture buys nothing and costs a
+process to maintain.
+
+Two things the reminder text must always carry, because the agent that reads it
+has none of this conversation:
+
+1. the **exact command** to run and how to read its output, and
+2. explicit instructions for **both** branches — including "stay silent and let
+   it re-arm" for the not-yet case, so a future agent does not surface a
+   half-check as noise or close the loop early.
+
+Never emulate this with `done` + re-`add` by hand: that was the old workaround
+for the counter bug above, and it loses the id across cycles.
 
 ## Creating one
 
@@ -96,4 +145,6 @@ surprise.
 
 Also be honest about the two structural limits when they matter: delivery is
 lazy (nothing pushes — see Architecture), and the store is per-host, so a
-reminder set here will not fire through a bot on another machine.
+reminder set here will not fire through a bot on another machine. Both matter
+most for a `repeat` poll: it can only check things reachable *from this host*,
+and it checks on the user's turns, not on the clock.

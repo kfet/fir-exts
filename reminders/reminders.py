@@ -101,6 +101,7 @@ def _load(force: bool = False) -> dict:
                     "text": op.get("text", ""),
                     "due": float(op.get("due", 0)),
                     "scope": op.get("scope", "any"),
+                    "repeat": float(op.get("repeat") or 0),
                     "created": op.get("at", 0),
                     "status": "pending",
                     "deliveries": 0,
@@ -112,8 +113,18 @@ def _load(force: bool = False) -> dict:
                 elif kind == "snooze":
                     r["due"] = float(op.get("due", r["due"]))
                     r["status"] = "pending"
+                    if not op.get("auto"):
+                        # An explicit deferral is a fresh start, not another
+                        # nag. Without this, N snoozes silently walk a
+                        # reminder into MAX_DELIVERIES and its cadence
+                        # degrades to 24h. The auto-snooze escape hatch is
+                        # exempt so it stays terminal.
+                        r["deliveries"] = 0
                 elif kind == "delivered":
-                    r["deliveries"] += 1
+                    if op.get("reset"):
+                        r["deliveries"] = 0  # repeating: each cycle starts clean
+                    else:
+                        r["deliveries"] += 1
                     r["due"] = float(op.get("next_due", r["due"]))
 
     _state["recs"] = recs
@@ -251,9 +262,30 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
     lines = []
     for r in sorted(due, key=lambda x: x["due"]):
         late = now - r["due"]
+        rep = r.get("repeat") or 0
         n = r["deliveries"] + 1
+        if rep:
+            # Recurring / poll-until-true: re-arm one interval out and reset
+            # the nag counter. It never auto-snoozes; only reminder_done ends
+            # it. This is what a conditional check ("am I home yet?") needs.
+            _append(
+                {
+                    "op": "delivered",
+                    "id": r["id"],
+                    "next_due": int(now + rep),
+                    "reset": True,
+                }
+            )
+            when = "due now" if late < 60 else f"overdue by {_ago(late)}"
+            lines.append(
+                f"- [{r['id']}] {r['text']}  ({when}; repeats every "
+                f"{_ago(rep)} — call reminder_done({r['id']}) once it is "
+                f"handled or its condition is met, otherwise do nothing "
+                f"and it will ask again)"
+            )
+            continue
         if n >= MAX_DELIVERIES:
-            _append({"op": "snooze", "id": r["id"], "due": int(now + 86400)})
+            _append({"op": "snooze", "id": r["id"], "due": int(now + 86400), "auto": True})
             lines.append(
                 f"- [{r['id']}] {r['text']} (overdue {_ago(late)}; "
                 f"surfaced {n}x — auto-snoozed 24h, close it with reminder_done)"
@@ -337,6 +369,17 @@ fir_ext.on("agent_start")(_hook_sweep)
                 "silently stranded forever if the conversation is deleted or "
                 "simply not revisited by the due time.",
             },
+            "repeat": {
+                "type": "string",
+                "description": "Optional repeat interval ('8h', '1d', '30m'). "
+                "The reminder re-arms itself this far out every time it "
+                "fires and NEVER auto-expires — it stops only when you call "
+                "reminder_done. Use it for recurring nudges, and for "
+                "poll-until-true checks where the reminder text tells the "
+                "future agent what to test (e.g. run a command; if the "
+                "condition does not hold, say nothing and let it re-arm). "
+                "Prefer this over done+re-add.",
+            },
         },
         "required": ["text", "due"],
     },
@@ -345,6 +388,17 @@ def reminder_add(args, ctx):
     due = parse_due(str(args["due"]))
     scope = str(args.get("scope") or "any")
     scope = _scope_here(ctx) if scope in ("here", "conv") else "any"
+    rep = 0
+    if args.get("repeat"):
+        raw = str(args["repeat"]).strip()
+        m = _REL.match(raw)
+        if not m:
+            raise ValueError(
+                f"repeat must be a relative interval like '8h', '1d30m' — got {raw!r}"
+            )
+        rep = sum(int(n) * _MULT[u.lower()] for n, u in _PART.findall(m.group(1)))
+        if rep <= 0:
+            raise ValueError(f"bad repeat interval: {raw!r}")
     rid = "r" + uuid.uuid4().hex[:6]
     _append(
         {
@@ -353,12 +407,15 @@ def reminder_add(args, ctx):
             "text": str(args["text"]),
             "due": int(due),
             "scope": scope,
+            "repeat": rep,
         }
     )
     _load(force=True)
     return (
         f"Reminder [{rid}] set for {time.strftime('%Y-%m-%d %H:%M', time.localtime(due))} "
-        f"(in {_ago(due - time.time())}), scope={scope}: {args['text']}"
+        f"(in {_ago(due - time.time())}), scope={scope}"
+        + (f", repeats every {_ago(rep)}" if rep else "")
+        + f": {args['text']}"
     )
 
 
@@ -394,7 +451,9 @@ def reminder_list(args, ctx):
         when = f"in {_ago(rel)}" if rel > 0 else f"OVERDUE {_ago(rel)}"
         out.append(
             f"[{r['id']}] {when} — {r['text']}  "
-            f"({r['status']}, scope={r['scope']}, surfaced {r['deliveries']}x)"
+            f"({r['status']}, scope={r['scope']}"
+            + (f", repeats {_ago(r['repeat'])}" if r.get("repeat") else "")
+            + f", surfaced {r['deliveries']}x)"
         )
     return "\n".join(out)
 
