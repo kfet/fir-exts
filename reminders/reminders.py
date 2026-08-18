@@ -2,7 +2,7 @@
 # ---
 # name: reminders
 # description: Durable reminders with lazy catch-up delivery (no daemon).
-# modes: tui, acp
+# modes: tui, text, acp
 # ---
 """Reminders — jsonl is truth, memory is cache.
 
