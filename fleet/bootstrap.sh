@@ -12,8 +12,13 @@ PKG_DIR="${FIR_FLEET_PKG_DIR:-$HOME/.config/fir/packages/git/github.com/kfet/fir
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 
 # 1. package clone. fir keys the clone on host/org/repo, so reuse it if present.
+# fetch+merge, never `git pull` — see the comment in converge.sh (FETCH_HEAD race).
 if [ -d "$PKG_DIR/.git" ]; then
-  git -C "$PKG_DIR" pull --ff-only --quiet || true
+  up=$(git -C "$PKG_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null \
+    || git -C "$PKG_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null \
+    || echo origin/main)
+  git -C "$PKG_DIR" fetch --quiet origin 2>/dev/null \
+    && git -C "$PKG_DIR" merge --ff-only --quiet "$up" 2>/dev/null || true
 else
   mkdir -p "$(dirname "$PKG_DIR")"
   git clone --quiet "$REPO" "$PKG_DIR"

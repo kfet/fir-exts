@@ -28,11 +28,22 @@ finish() {
 }
 trap finish EXIT
 
-# 1. pull, and re-exec ourselves if this very script moved
-reason='git pull failed'
+# 1. pull, and re-exec ourselves if this very script moved.
+# NEVER `git pull`: it decides what to merge by reading FETCH_HEAD, which git
+# rewrites non-atomically. fir itself runs `git fetch --tags origin` on this same
+# clone at session start, so a concurrent fetch clobbers the FETCH_HEAD our pull
+# is mid-read of — giving "Cannot fast-forward to multiple branches" (duplicated
+# entries) or "no such ref was fetched" (lost entry). fetch + merge of the
+# remote-tracking REF instead: ref updates are atomic, so a racing fetch can at
+# worst leave us one commit behind, which the next run picks up.
+reason='git fetch/merge failed'
 me="$PKG_DIR/fleet/converge.sh"
 before=$(cksum "$me" 2>/dev/null || echo none)
-git -C "$PKG_DIR" pull --ff-only --quiet
+upstream=$(git -C "$PKG_DIR" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null \
+        || git -C "$PKG_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null \
+        || echo origin/main)
+git -C "$PKG_DIR" fetch --quiet origin
+git -C "$PKG_DIR" merge --ff-only --quiet "$upstream"
 if [ "${FIR_CONVERGE_REEXEC:-0}" != 1 ] && [ "$(cksum "$me" 2>/dev/null || echo none)" != "$before" ]; then
   echo "converge.sh changed — re-exec"; trap - EXIT; FIR_CONVERGE_REEXEC=1 exec "$me" "$@"
 fi

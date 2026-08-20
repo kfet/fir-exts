@@ -65,6 +65,27 @@ run >/dev/null 2>&1
 [ ! -f "$D/reminders-store.conf" ]; check "superseded drop-in removed" $?
 [ -f "$D/graceful.conf" ]; check "unrelated drop-in (graceful.conf) survives" $?
 
+# concurrent `git fetch --tags origin` — exactly what fir runs on this same clone
+# at session start — must not break converge. `git pull` reads FETCH_HEAD, which
+# git rewrites non-atomically, and failed ~60% of the time under this contention
+# ("Cannot fast-forward to multiple branches" / "no such ref was fetched").
+( i=0; while [ $i -lt 200 ]; do git -C "$PKG" fetch --tags origin >/dev/null 2>&1; i=$((i+1)); done ) &
+racer=$!
+races=0; raced_fail=0
+while [ $races -lt 8 ] && kill -0 "$racer" 2>/dev/null; do
+  out=$(run) || { raced_fail=$((raced_fail+1)); echo "  race failure: $(echo "$out" | head -1)"; }
+  races=$((races+1))
+done
+kill "$racer" 2>/dev/null; wait "$racer" 2>/dev/null
+[ "$raced_fail" = 0 ]; check "survives a concurrent git fetch on the same clone" $? "$raced_fail/$races runs failed"
+
+# and it must not depend on FETCH_HEAD at all: poison it with the exact duplicate
+# entries that produced "Cannot fast-forward to multiple branches" in the field
+dup=$(git -C "$PKG" rev-parse HEAD)
+printf '%s\t\tbranch '\''main'\'' of origin\n%s\t\tbranch '\''main'\'' of origin\n' "$dup" "$dup" \
+  >"$PKG/.git/FETCH_HEAD"
+out=$(run); check "ignores a poisoned FETCH_HEAD" $? "$out"
+
 # induced failure: unreachable git origin => FAIL status, nonzero exit
 git -C "$PKG" remote set-url origin "$T/nope"
 out=$(run); rc=$?
