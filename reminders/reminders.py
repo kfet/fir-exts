@@ -8,11 +8,12 @@
 
 Design (see conversation notes):
   * store: a DIRECTORY of per-host shards (sharded writes, shared reads).
-    $FIR_REMINDERS_STORE, else ~/sync/shared/reminders/ (Syncthing, fleet-wide),
-    else the legacy poe-acp single file if present, else
+    $FIR_REMINDERS_STORE, else an OPTED-IN shared dir (see _resolve_store),
+    else the legacy poe-acp single file if it already exists, else
     $XDG_STATE_HOME/fir-reminders/. This host appends ONLY to its own shard
     <store>/<shard_id>.jsonl; reads glob every *.jsonl and reduce the union.
-    No two hosts write the same file, so Syncthing cannot conflict on it.
+    No two hosts write the same file, so a file-sync tool cannot conflict
+    on it.
   * sweep: on session_start (log only) and turn_start (steer into live turn);
     agent_start is kept for other modes but never fires under ACP
   * NO in-process timer: conv sessions are evicted (--session-ttl), so a
@@ -37,12 +38,44 @@ import fir_ext
 
 # ---------------------------------------------------------------- layout
 
+# A single file some of us carried over from poe-acp. This is a MIGRATION
+# SOURCE ONLY: it is consulted solely when it already exists, so it can never
+# become the default for anyone who has not used poe-acp.
 LEGACY_POE_ACP = "~/.local/state/poe-acp/notes/reminders.jsonl"
-SHARED_ROOT = "~/sync/shared"
+
+# Fallback convention for a file-synced (Syncthing/Dropbox/...) directory
+# shared across a user's machines. Only a CONVENTION — never adopted on its
+# own existence; see _shared_store_dir().
+SHARED_ROOT_DEFAULT = "~/sync/shared"
+# Subdirectory of the shared root that holds the reminder shards.
+SHARED_SUBDIR = "reminders"
 
 
 def _xdg_state() -> str:
     return os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+
+
+def _shared_store_dir() -> str | None:
+    """The opted-in shared store dir, or None.
+
+    Adoption is OPT-IN BY MKDIR: we take <root>/reminders/ only when that
+    subdirectory ALREADY EXISTS. Merely having a synced folder is not consent
+    — a stranger with an unrelated ~/sync/shared must not have their
+    reminders silently relocated into it. Creating the directory once, by
+    hand, is the whole deployment step; no env plumbing needed after that.
+
+    Roots tried in order: $FIR_SHARED_DIR, then the ~/sync/shared convention.
+    """
+    roots = []
+    env = os.environ.get("FIR_SHARED_DIR")
+    if env:
+        roots.append(os.path.expanduser(env))
+    roots.append(os.path.expanduser(SHARED_ROOT_DEFAULT))
+    for root in roots:
+        cand = os.path.join(root, SHARED_SUBDIR)
+        if os.path.isdir(cand):
+            return cand
+    return None
 
 
 def _resolve_store() -> tuple[str, str]:
@@ -51,8 +84,11 @@ def _resolve_store() -> tuple[str, str]:
     Order:
       1. $FIR_REMINDERS_STORE — a directory, unless it names an existing file
          or ends in .jsonl (legacy single-file mode, kept working).
-      2. ~/sync/shared/reminders/ when ~/sync/shared exists (Syncthing fleet).
-      3. the legacy poe-acp single file, if it already exists.
+      2. an opted-in shared dir: $FIR_SHARED_DIR/reminders/ or
+         ~/sync/shared/reminders/, and only if that directory already exists
+         (see _shared_store_dir — mkdir is the opt-in).
+      3. the legacy poe-acp single file, but ONLY if it already exists —
+         never a default for a fresh install.
       4. $XDG_STATE_HOME/fir-reminders/ (a directory now, not a file).
     """
     env = os.environ.get("FIR_REMINDERS_STORE")
@@ -61,9 +97,9 @@ def _resolve_store() -> tuple[str, str]:
         if p.endswith(".jsonl") or os.path.isfile(p):
             return ("file", p)
         return ("dir", p)
-    shared = os.path.expanduser(SHARED_ROOT)
-    if os.path.isdir(shared):
-        return ("dir", os.path.join(shared, "reminders"))
+    shared = _shared_store_dir()
+    if shared:
+        return ("dir", shared)
     legacy = os.path.expanduser(LEGACY_POE_ACP)
     if os.path.exists(legacy):
         return ("file", legacy)
