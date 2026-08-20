@@ -284,6 +284,95 @@ rem._append({"op": "add", "id": "n2", "text": "mine", "due": 1})
 check("file mode reads only its own file", set(rem._load(force=True)) == {"n2"},
       set(rem._load(force=True)))
 
+# ======================================================================
+# resolution without $FIR_REMINDERS_STORE — no local-isms, opt-in by mkdir
+# ======================================================================
+REAL_HOME = os.environ.get("HOME")
+REAL_XDG = os.environ.get("XDG_STATE_HOME")
+
+def resolve_in(home, shared_env=None, mk=(), legacy=False):
+    """Resolve the store inside a throwaway HOME. Returns (mode, path)."""
+    os.makedirs(home, exist_ok=True)
+    for d in mk:
+        os.makedirs(os.path.join(home, d), exist_ok=True)
+    if legacy:
+        p = os.path.join(home, ".local/state/poe-acp/notes/reminders.jsonl")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "a").close()
+    os.environ.pop("FIR_REMINDERS_STORE", None)
+    os.environ.pop("FIR_SHARED_DIR", None)
+    if shared_env is not None:
+        os.environ["FIR_SHARED_DIR"] = shared_env
+    os.environ["HOME"] = home
+    os.environ["XDG_STATE_HOME"] = os.path.join(home, ".local/state")
+    try:
+        return rem._resolve_store()
+    finally:
+        os.environ["HOME"] = REAL_HOME
+        if REAL_XDG is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = REAL_XDG
+        os.environ.pop("FIR_SHARED_DIR", None)
+
+# --- 14. a stranger who merely HAS ~/sync/shared is left alone --------
+H = os.path.join(TMP, "home_stranger")
+mode, path = resolve_in(H, mk=["sync/shared"])
+check("bare ~/sync/shared is NOT adopted",
+      (mode, path) == ("dir", os.path.join(H, ".local/state", "fir-reminders")),
+      (mode, path))
+
+# nor is a stray FILE named reminders in there
+H = os.path.join(TMP, "home_strayfile")
+os.makedirs(os.path.join(H, "sync/shared"), exist_ok=True)
+open(os.path.join(H, "sync/shared/reminders"), "w").close()
+mode, path = resolve_in(H)
+check("a FILE named reminders is not a shared store",
+      path == os.path.join(H, ".local/state", "fir-reminders"), path)
+
+# --- 15. mkdir is the opt-in -----------------------------------------
+H = os.path.join(TMP, "home_optin")
+mode, path = resolve_in(H, mk=["sync/shared/reminders"])
+check("mkdir ~/sync/shared/reminders opts in",
+      (mode, path) == ("dir", os.path.join(H, "sync/shared/reminders")), (mode, path))
+
+# --- 16. $FIR_SHARED_DIR overrides the convention ---------------------
+H = os.path.join(TMP, "home_env")
+alt = os.path.join(TMP, "dropbox_fleet")
+os.makedirs(os.path.join(alt, "reminders"), exist_ok=True)
+mode, path = resolve_in(H, shared_env=alt, mk=["sync/shared/reminders"])
+check("FIR_SHARED_DIR wins over ~/sync/shared",
+      (mode, path) == ("dir", os.path.join(alt, "reminders")), (mode, path))
+
+# set but not opted in -> falls back to the convention, then to XDG
+H = os.path.join(TMP, "home_env2")
+empty = os.path.join(TMP, "dropbox_empty")
+os.makedirs(empty, exist_ok=True)
+mode, path = resolve_in(H, shared_env=empty, mk=["sync/shared/reminders"])
+check("un-opted FIR_SHARED_DIR falls back to the convention",
+      path == os.path.join(H, "sync/shared/reminders"), path)
+H = os.path.join(TMP, "home_env3")
+mode, path = resolve_in(H, shared_env=empty)
+check("no opted-in root anywhere -> XDG",
+      path == os.path.join(H, ".local/state", "fir-reminders"), path)
+check("FIR_SHARED_DIR expands ~", "~" not in path)
+
+# --- 17. poe-acp legacy is a migration source, never a fresh default ---
+H = os.path.join(TMP, "home_legacy")
+mode, path = resolve_in(H, legacy=True)
+check("existing poe-acp file is still honoured",
+      (mode, path) == ("file", os.path.join(H, ".local/state/poe-acp/notes/reminders.jsonl")),
+      (mode, path))
+H = os.path.join(TMP, "home_nolegacy")
+mode, path = resolve_in(H)
+check("no poe-acp file -> never invented",
+      (mode, path) == ("dir", os.path.join(H, ".local/state", "fir-reminders")), (mode, path))
+# an opted-in shared dir outranks the legacy file (which then migrates in)
+H = os.path.join(TMP, "home_both")
+mode, path = resolve_in(H, mk=["sync/shared/reminders"], legacy=True)
+check("shared dir outranks legacy file",
+      path == os.path.join(H, "sync/shared/reminders"), path)
+
 print()
 print("FAILED: " + ", ".join(fails) if fails else "ALL PASS")
 sys.exit(1 if fails else 0)
