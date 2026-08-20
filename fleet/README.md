@@ -41,7 +41,15 @@ next pull picks it up, and the script re-execs itself if it changed mid-run.
 
 ## What converge.sh does
 
-1. `git pull --ff-only` the package clone; re-exec itself if the script changed.
+1. `git fetch origin` + `git merge --ff-only` the clone's upstream ref; re-exec
+   itself if the script changed. **Never `git pull`** — pull picks its merge
+   target by reading `FETCH_HEAD`, which git rewrites non-atomically, and fir's
+   own package updater runs `git fetch --tags origin` on this same clone at
+   session start. On a host with live agents the two interleave and pull dies
+   with `Cannot fast-forward to multiple branches` (duplicated entry) or
+   `no such ref was fetched` (lost entry) — this took out 5/7 hosts on first
+   rollout. Remote-tracking ref updates *are* atomic, so fetch+merge is safe;
+   worst case a racing fetch leaves the host one commit behind for an hour.
 2. Ensure `[ -f "$HOME/sync/shared/fleet/env" ] && . "$HOME/sync/shared/fleet/env"`
    appears exactly once in `~/.profile` and `~/.zshenv` (creating them if absent),
    and delete the legacy raw `export FIR_REMINDERS_STORE=...` lines it supersedes.
