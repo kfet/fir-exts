@@ -49,24 +49,29 @@ Durable reminders. **jsonl is truth, memory is cache.**
 - Store: a **directory** of per-host shards. Precedence:
   1. `$FIR_REMINDERS_STORE` (if it names an existing file or ends in `.jsonl`,
      the old single-file mode is kept, so in-place upgrades never lose items)
-  2. `$FIR_SHARED_DIR/reminders/`, then `~/sync/shared/reminders/` — adopted
-     **only if that directory already exists**. `mkdir` is the opt-in: having a
-     synced folder is not consent to relocate your reminders into it.
-  3. a pre-existing legacy `~/.local/state/poe-acp/notes/reminders.jsonl`
-     (migration source only, never invented for a fresh install)
-  4. `$XDG_STATE_HOME/fir-reminders/` — the local-only default
+  2. `$XDG_STATE_HOME/fir-reminders/` — the default
+  No other path is consulted: the extension hardcodes no infrastructure paths
+  and probes no well-known directories.
 - **Sharded writes, shared reads:** this host appends only to
   `<store>/<shard>.jsonl`, where shard = `$FIR_REMINDERS_SHARD` or the hostname
   (sanitised to `[A-Za-z0-9._-]`). Reads glob every `*.jsonl` in the store and
   reduce the union, ordered by `(at, shard filename, line number)`. Since no two
-  hosts write the same file, any folder-syncing tool (Syncthing, Dropbox, …) can
-  host the store without ever producing a write conflict — and a
-  `.sync-conflict-*.jsonl` that shows up anyway is simply read as one more shard.
-  Half-synced/truncated lines are skipped silently. First run in a shared store
-  copies a legacy single file into this host's shard once, leaving the original
-  in place.
-- To go fleet-wide: `mkdir <synced-folder>/reminders` and, unless that folder is
-  `~/sync/shared`, export `FIR_SHARED_DIR=<synced-folder>`.
+  hosts write the same file, a folder-syncing tool can host the store without
+  ever producing a write conflict — and a `.sync-conflict-*.jsonl` that shows up
+  anyway is simply read as one more shard. Half-synced/truncated lines are
+  skipped silently.
+- **Fleet-wide reminders are deployment config, not a feature.** Point
+  `$FIR_REMINDERS_STORE` at a directory that is synced between your machines —
+  e.g. a Syncthing or Dropbox folder, or a shared mount — and every host's shard
+  lands in the same place, so any host can see and close any reminder:
+  ```sh
+  export FIR_REMINDERS_STORE=~/some-synced-folder/reminders
+  ```
+  Leave it unset and everything stays local to this machine.
+- **Migrating an old single-file store:** on first run in a directory store,
+  if this host has no shard yet, one file is copied in to seed it (source left
+  untouched). Sources: `$XDG_STATE_HOME/fir-reminders/reminders.jsonl`, plus an
+  optional colon-separated `$FIR_REMINDERS_MIGRATE_FROM` list of extra files.
 - `done` is **absorbing**: once a reminder is closed, later `snooze`/`delivered`
   ops for that id are ignored regardless of timestamp, so skewed host clocks
   cannot resurrect it. Delivery is *not* de-duplicated across hosts — the same

@@ -8,12 +8,15 @@
 
 Design (see conversation notes):
   * store: a DIRECTORY of per-host shards (sharded writes, shared reads).
-    $FIR_REMINDERS_STORE, else an OPTED-IN shared dir (see _resolve_store),
-    else the legacy poe-acp single file if it already exists, else
-    $XDG_STATE_HOME/fir-reminders/. This host appends ONLY to its own shard
-    <store>/<shard_id>.jsonl; reads glob every *.jsonl and reduce the union.
-    No two hosts write the same file, so a file-sync tool cannot conflict
-    on it.
+    $FIR_REMINDERS_STORE, else $XDG_STATE_HOME/fir-reminders/. This host
+    appends ONLY to its own shard <store>/<shard_id>.jsonl; reads glob every
+    *.jsonl and reduce the union. No two hosts write the same file, so a
+    file-syncing tool cannot produce a write conflict on the store.
+  * fleet-wide sharing is DEPLOYMENT CONFIG, not something this extension
+    knows about: point $FIR_REMINDERS_STORE at a directory that is synced
+    between your machines (a Syncthing/Dropbox folder, a shared mount, …) and
+    every host's shard lands in the same place. The extension itself hardcodes
+    no infrastructure paths and probes for none.
   * sweep: on session_start (log only) and turn_start (steer into live turn);
     agent_start is kept for other modes but never fires under ACP
   * NO in-process timer: conv sessions are evicted (--session-ttl), so a
@@ -38,58 +41,30 @@ import fir_ext
 
 # ---------------------------------------------------------------- layout
 
-# A single file some of us carried over from poe-acp. This is a MIGRATION
-# SOURCE ONLY: it is consulted solely when it already exists, so it can never
-# become the default for anyone who has not used poe-acp.
-LEGACY_POE_ACP = "~/.local/state/poe-acp/notes/reminders.jsonl"
-
-# Fallback convention for a file-synced (Syncthing/Dropbox/...) directory
-# shared across a user's machines. Only a CONVENTION — never adopted on its
-# own existence; see _shared_store_dir().
-SHARED_ROOT_DEFAULT = "~/sync/shared"
-# Subdirectory of the shared root that holds the reminder shards.
-SHARED_SUBDIR = "reminders"
+# Name of the pre-shard single-file store, looked for inside the XDG state
+# dir when seeding a new shard. Not a path to anyone's infrastructure.
+LEGACY_BASENAME = "reminders.jsonl"
 
 
 def _xdg_state() -> str:
     return os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
 
 
-def _shared_store_dir() -> str | None:
-    """The opted-in shared store dir, or None.
-
-    Adoption is OPT-IN BY MKDIR: we take <root>/reminders/ only when that
-    subdirectory ALREADY EXISTS. Merely having a synced folder is not consent
-    — a stranger with an unrelated ~/sync/shared must not have their
-    reminders silently relocated into it. Creating the directory once, by
-    hand, is the whole deployment step; no env plumbing needed after that.
-
-    Roots tried in order: $FIR_SHARED_DIR, then the ~/sync/shared convention.
-    """
-    roots = []
-    env = os.environ.get("FIR_SHARED_DIR")
-    if env:
-        roots.append(os.path.expanduser(env))
-    roots.append(os.path.expanduser(SHARED_ROOT_DEFAULT))
-    for root in roots:
-        cand = os.path.join(root, SHARED_SUBDIR)
-        if os.path.isdir(cand):
-            return cand
-    return None
+def _xdg_store_dir() -> str:
+    return os.path.join(_xdg_state(), "fir-reminders")
 
 
 def _resolve_store() -> tuple[str, str]:
     """Resolve the store. Returns (mode, path); mode is 'dir' or 'file'.
 
-    Order:
+    Order — generic only. This extension hardcodes no infrastructure paths
+    and probes no well-known directories:
       1. $FIR_REMINDERS_STORE — a directory, unless it names an existing file
          or ends in .jsonl (legacy single-file mode, kept working).
-      2. an opted-in shared dir: $FIR_SHARED_DIR/reminders/ or
-         ~/sync/shared/reminders/, and only if that directory already exists
-         (see _shared_store_dir — mkdir is the opt-in).
-      3. the legacy poe-acp single file, but ONLY if it already exists —
-         never a default for a fresh install.
-      4. $XDG_STATE_HOME/fir-reminders/ (a directory now, not a file).
+      2. $XDG_STATE_HOME/fir-reminders/ (a directory, not a file).
+
+    To share reminders across machines, set $FIR_REMINDERS_STORE to a synced
+    directory. That is deployment configuration, not a default.
     """
     env = os.environ.get("FIR_REMINDERS_STORE")
     if env:
@@ -97,13 +72,7 @@ def _resolve_store() -> tuple[str, str]:
         if p.endswith(".jsonl") or os.path.isfile(p):
             return ("file", p)
         return ("dir", p)
-    shared = _shared_store_dir()
-    if shared:
-        return ("dir", shared)
-    legacy = os.path.expanduser(LEGACY_POE_ACP)
-    if os.path.exists(legacy):
-        return ("file", legacy)
-    return ("dir", os.path.join(_xdg_state(), "fir-reminders"))
+    return ("dir", _xdg_store_dir())
 
 
 def _shard_id() -> str:
@@ -139,21 +108,36 @@ def _init_store() -> None:
             pass
 
 
+def _migrate_sources() -> list[str]:
+    """Candidate legacy single-file stores to seed a new shard from.
+
+    Generic and caller-driven:
+      * $XDG_STATE_HOME/fir-reminders/reminders.jsonl — this extension's own
+        pre-shard layout, so an in-place upgrade never loses pending items.
+      * $FIR_REMINDERS_MIGRATE_FROM — optional colon-separated list of extra
+        files, for anyone importing from somewhere else. Deployment supplies
+        the paths; the extension knows none of them.
+    """
+    out = [os.path.join(_xdg_store_dir(), LEGACY_BASENAME)]
+    extra = os.environ.get("FIR_REMINDERS_MIGRATE_FROM") or ""
+    for part in extra.split(":"):
+        part = part.strip()
+        if part:
+            out.append(os.path.expanduser(part))
+    return out
+
+
 def _migrate_legacy() -> None:
     """One-time: seed our shard from a pre-existing legacy single file.
 
-    Only runs when our shard does not exist yet, and only for legacy files
-    that live OUTSIDE the store dir (anything inside it is already globbed as
-    a shard — copying that would double-count its ops). The legacy file is
-    left in place, untouched.
+    Only runs when our shard does not exist yet, and only for sources that
+    live OUTSIDE the store dir (anything inside it is already globbed as a
+    shard — copying that would double-count its ops). The source file is left
+    in place, untouched.
     """
     if os.path.exists(STORE):
         return
-    candidates = [
-        os.path.expanduser(LEGACY_POE_ACP),
-        os.path.join(_xdg_state(), "fir-reminders", "reminders.jsonl"),
-    ]
-    for src in candidates:
+    for src in _migrate_sources():
         if not os.path.isfile(src):
             continue
         if os.path.dirname(os.path.abspath(src)) == os.path.abspath(STORE_DIR):

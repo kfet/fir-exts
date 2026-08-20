@@ -26,10 +26,14 @@ def check(name, cond, extra=""):
     print(("PASS " if cond else "FAIL ") + name + ("" if cond else "  " + str(extra)))
     if not cond: fails.append(name)
 
-def use_store(path, shard="hostA"):
+def use_store(path, shard="hostA", migrate_from=None):
     """Point the module at a store dir/file and re-resolve."""
     os.environ["FIR_REMINDERS_STORE"] = path
     os.environ["FIR_REMINDERS_SHARD"] = shard
+    if migrate_from:
+        os.environ["FIR_REMINDERS_MIGRATE_FROM"] = migrate_from
+    else:
+        os.environ.pop("FIR_REMINDERS_MIGRATE_FROM", None)
     rem._init_store()
 
 def reset():
@@ -250,20 +254,19 @@ check("size-only change invalidates cache", "s3" in rem._load(force=False))
 check("cache key is (path, mtime, size) per shard",
       all(len(t) == 3 for t in key1) and len(key1) == 1, key1)
 
-# --- 12. one-time migration from a legacy single file -----------------
+# --- 12. one-time migration via $FIR_REMINDERS_MIGRATE_FROM -----------
 legacy = os.path.join(TMP, "legacy", "reminders.jsonl")
 os.makedirs(os.path.dirname(legacy), exist_ok=True)
 with open(legacy, "w") as fh:
     fh.write(json.dumps({"op": "add", "id": "m1", "text": "old", "due": 42, "at": 1}) + "\n")
-rem.LEGACY_POE_ACP = legacy
 D = os.path.join(TMP, "store12")
-use_store(D, shard="hostA")
+use_store(D, shard="hostA", migrate_from=legacy)
 check("migration seeds our shard", os.path.exists(os.path.join(D, "hostA.jsonl")))
 check("migrated record readable", "m1" in rem._load(force=True))
 check("legacy file left in place", os.path.exists(legacy))
 # second init must NOT re-copy (shard already exists) and must not duplicate
 rem._append({"op": "snooze", "id": "m1", "due": 77})
-use_store(D, shard="hostA")
+use_store(D, shard="hostA", migrate_from=legacy)
 recs = rem._load(force=True)
 check("migration is one-time", recs["m1"]["due"] == 77, recs["m1"])
 n = open(os.path.join(D, "hostA.jsonl")).read().count('"m1"')
@@ -273,7 +276,35 @@ use_store(D, shard="hostB")
 check("other host gets its own shard path",
       os.path.basename(rem.STORE) == "hostB.jsonl")
 check("other host still sees m1 via union", "m1" in rem._load(force=True))
-rem.LEGACY_POE_ACP = "~/.local/state/poe-acp/notes/reminders.jsonl"
+
+# no env, no migration: an unrelated legacy file is never found by itself
+D = os.path.join(TMP, "store12b")
+use_store(D, shard="hostA")
+check("migration only from declared sources", not os.path.exists(os.path.join(D, "hostA.jsonl")))
+
+# the list is colon-separated; first existing source wins, missing ones skipped
+second = os.path.join(TMP, "legacy2", "other.jsonl")
+os.makedirs(os.path.dirname(second), exist_ok=True)
+with open(second, "w") as fh:
+    fh.write(json.dumps({"op": "add", "id": "m2", "text": "second", "due": 9, "at": 1}) + "\n")
+D = os.path.join(TMP, "store12c")
+use_store(D, shard="hostA",
+          migrate_from=os.path.join(TMP, "nope.jsonl") + ":" + second + ":" + legacy)
+recs = rem._load(force=True)
+check("colon list skips missing, takes first existing", set(recs) == {"m2"}, set(recs))
+
+# a source that already lives inside the store dir is skipped (it is a shard)
+D = os.path.join(TMP, "store12d")
+os.makedirs(D, exist_ok=True)
+inside = os.path.join(D, "reminders.jsonl")
+with open(inside, "w") as fh:
+    fh.write(json.dumps({"op": "add", "id": "m3", "text": "inside", "due": 1, "at": 1}) + "\n")
+    fh.write(json.dumps({"op": "delivered", "id": "m3", "next_due": 5, "at": 2}) + "\n")
+use_store(D, shard="hostA", migrate_from=inside)
+check("in-store source not copied (no double-count)",
+      not os.path.exists(os.path.join(D, "hostA.jsonl")))
+check("in-store legacy file is just read as a shard",
+      rem._load(force=True)["m3"]["deliveries"] == 1)
 
 # --- 13. legacy single-file mode does not glob siblings ---------------
 D = os.path.join(TMP, "store13")
@@ -285,26 +316,23 @@ check("file mode reads only its own file", set(rem._load(force=True)) == {"n2"},
       set(rem._load(force=True)))
 
 # ======================================================================
-# resolution without $FIR_REMINDERS_STORE — no local-isms, opt-in by mkdir
+# resolution without $FIR_REMINDERS_STORE — generic only, no infra paths
 # ======================================================================
 REAL_HOME = os.environ.get("HOME")
 REAL_XDG = os.environ.get("XDG_STATE_HOME")
 
-def resolve_in(home, shared_env=None, mk=(), legacy=False):
+def resolve_in(home, xdg=None, mk=(), files=()):
     """Resolve the store inside a throwaway HOME. Returns (mode, path)."""
     os.makedirs(home, exist_ok=True)
     for d in mk:
         os.makedirs(os.path.join(home, d), exist_ok=True)
-    if legacy:
-        p = os.path.join(home, ".local/state/poe-acp/notes/reminders.jsonl")
+    for f in files:
+        p = os.path.join(home, f)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         open(p, "a").close()
     os.environ.pop("FIR_REMINDERS_STORE", None)
-    os.environ.pop("FIR_SHARED_DIR", None)
-    if shared_env is not None:
-        os.environ["FIR_SHARED_DIR"] = shared_env
     os.environ["HOME"] = home
-    os.environ["XDG_STATE_HOME"] = os.path.join(home, ".local/state")
+    os.environ["XDG_STATE_HOME"] = xdg or os.path.join(home, ".local/state")
     try:
         return rem._resolve_store()
     finally:
@@ -313,65 +341,60 @@ def resolve_in(home, shared_env=None, mk=(), legacy=False):
             os.environ.pop("XDG_STATE_HOME", None)
         else:
             os.environ["XDG_STATE_HOME"] = REAL_XDG
-        os.environ.pop("FIR_SHARED_DIR", None)
 
-# --- 14. a stranger who merely HAS ~/sync/shared is left alone --------
-H = os.path.join(TMP, "home_stranger")
-mode, path = resolve_in(H, mk=["sync/shared"])
-check("bare ~/sync/shared is NOT adopted",
+# --- 14. default is XDG, and nothing else ------------------------------
+H = os.path.join(TMP, "home_plain")
+mode, path = resolve_in(H)
+check("default store is $XDG_STATE_HOME/fir-reminders (dir)",
       (mode, path) == ("dir", os.path.join(H, ".local/state", "fir-reminders")),
       (mode, path))
 
-# nor is a stray FILE named reminders in there
-H = os.path.join(TMP, "home_strayfile")
-os.makedirs(os.path.join(H, "sync/shared"), exist_ok=True)
-open(os.path.join(H, "sync/shared/reminders"), "w").close()
-mode, path = resolve_in(H)
-check("a FILE named reminders is not a shared store",
+# a synced folder lying around is NOT adopted — no probing of anything
+H = os.path.join(TMP, "home_hassync")
+mode, path = resolve_in(H, mk=["sync/shared/reminders", "Dropbox/reminders"],
+                        files=[".local/state/poe-acp/notes/reminders.jsonl"])
+check("no well-known directory is ever probed",
       path == os.path.join(H, ".local/state", "fir-reminders"), path)
+check("no infra path in the module source",
+      not any(s in open("reminders.py").read()
+              for s in ("sync/shared", "poe-acp", "~/Dropbox")))
 
-# --- 15. mkdir is the opt-in -----------------------------------------
-H = os.path.join(TMP, "home_optin")
-mode, path = resolve_in(H, mk=["sync/shared/reminders"])
-check("mkdir ~/sync/shared/reminders opts in",
-      (mode, path) == ("dir", os.path.join(H, "sync/shared/reminders")), (mode, path))
+# $XDG_STATE_HOME is honoured when set elsewhere
+H = os.path.join(TMP, "home_xdg")
+X = os.path.join(TMP, "xdg_elsewhere")
+mode, path = resolve_in(H, xdg=X)
+check("XDG_STATE_HOME honoured", path == os.path.join(X, "fir-reminders"), path)
 
-# --- 16. $FIR_SHARED_DIR overrides the convention ---------------------
-H = os.path.join(TMP, "home_env")
-alt = os.path.join(TMP, "dropbox_fleet")
-os.makedirs(os.path.join(alt, "reminders"), exist_ok=True)
-mode, path = resolve_in(H, shared_env=alt, mk=["sync/shared/reminders"])
-check("FIR_SHARED_DIR wins over ~/sync/shared",
-      (mode, path) == ("dir", os.path.join(alt, "reminders")), (mode, path))
+# --- 15. $FIR_REMINDERS_STORE is the only knob -------------------------
+D = os.path.join(TMP, "store15")
+use_store(D)
+check("env dir wins", (rem.STORE_MODE, rem.STORE_DIR) == ("dir", D))
+use_store(os.path.join(D, "one.jsonl"))
+check(".jsonl suffix -> file mode", rem.STORE_MODE == "file")
+f = os.path.join(TMP, "store15file")
+open(f, "w").close()
+use_store(f)
+check("existing file -> file mode (no suffix needed)",
+      (rem.STORE_MODE, rem.STORE) == ("file", f))
+os.environ["FIR_REMINDERS_STORE"] = "~/store15tilde"
+rem._init_store()
+check("env store expands ~", rem.STORE_DIR == os.path.expanduser("~/store15tilde"))
 
-# set but not opted in -> falls back to the convention, then to XDG
-H = os.path.join(TMP, "home_env2")
-empty = os.path.join(TMP, "dropbox_empty")
-os.makedirs(empty, exist_ok=True)
-mode, path = resolve_in(H, shared_env=empty, mk=["sync/shared/reminders"])
-check("un-opted FIR_SHARED_DIR falls back to the convention",
-      path == os.path.join(H, "sync/shared/reminders"), path)
-H = os.path.join(TMP, "home_env3")
-mode, path = resolve_in(H, shared_env=empty)
-check("no opted-in root anywhere -> XDG",
-      path == os.path.join(H, ".local/state", "fir-reminders"), path)
-check("FIR_SHARED_DIR expands ~", "~" not in path)
+# --- 16. sharing a store across hosts is pure deployment config --------
+SYNCED = os.path.join(TMP, "any_synced_folder")
+use_store(SYNCED, shard="hostA")
+rem._append({"op": "add", "id": "f1", "text": "set on A", "due": 1})
+use_store(SYNCED, shard="hostB")
+rem._append({"op": "add", "id": "f2", "text": "set on B", "due": 1})
+recs = rem._load(force=True)
+check("two hosts pointed at one dir share reminders", set(recs) == {"f1", "f2"}, set(recs))
+check("each host wrote only its own shard",
+      sorted(os.path.basename(p) for p in rem._shards()) == ["hostA.jsonl", "hostB.jsonl"],
+      rem._shards())
+rem._append({"op": "done", "id": "f1"})
+check("host B can close host A's reminder",
+      rem._load(force=True)["f1"]["status"] == "done")
 
-# --- 17. poe-acp legacy is a migration source, never a fresh default ---
-H = os.path.join(TMP, "home_legacy")
-mode, path = resolve_in(H, legacy=True)
-check("existing poe-acp file is still honoured",
-      (mode, path) == ("file", os.path.join(H, ".local/state/poe-acp/notes/reminders.jsonl")),
-      (mode, path))
-H = os.path.join(TMP, "home_nolegacy")
-mode, path = resolve_in(H)
-check("no poe-acp file -> never invented",
-      (mode, path) == ("dir", os.path.join(H, ".local/state", "fir-reminders")), (mode, path))
-# an opted-in shared dir outranks the legacy file (which then migrates in)
-H = os.path.join(TMP, "home_both")
-mode, path = resolve_in(H, mk=["sync/shared/reminders"], legacy=True)
-check("shared dir outranks legacy file",
-      path == os.path.join(H, "sync/shared/reminders"), path)
 
 print()
 print("FAILED: " + ", ".join(fails) if fails else "ALL PASS")

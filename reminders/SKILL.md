@@ -13,26 +13,24 @@ timer. The clock does not fire a reminder; **waking up does**.
 - **Store:** a *directory* of append-only op logs (`add` / `done` / `snooze` /
   `delivered`). jsonl is truth, memory is cache. Records replay from the log,
   so new fields degrade safely on old stores.
-- **Fleet-wide, sharded writes / shared reads.** If a shared store directory
-  exists, reminders are fleet-wide: each host appends **only** to its own shard
+- **Sharded writes, shared reads.** Each host appends **only** to its own shard
   `<store>/<hostname>.jsonl`, and every read globs `*.jsonl` and reduces the
-  union. Two hosts never write the same file, so a file-sync tool (Syncthing,
-  Dropbox, anything that syncs a folder) cannot produce a conflict on it. A
-  reminder set on one host is visible — and closable — from any host.
+  union. Two hosts never write the same file, so a folder-syncing tool cannot
+  produce a write conflict on the store.
 - **Store precedence:**
   1. `$FIR_REMINDERS_STORE` — the store directory. If it names an existing
      file or ends in `.jsonl`, the old single-file mode is used.
-  2. `$FIR_SHARED_DIR/reminders/`, then `~/sync/shared/reminders/` — but
-     **only if that directory already exists**. Creating it is the opt-in;
-     merely having a synced folder never relocates anyone's reminders.
-  3. a pre-existing legacy `~/.local/state/poe-acp/notes/reminders.jsonl`
-     (migration path only — never invented for a fresh install).
-  4. `$XDG_STATE_HOME/fir-reminders/` — local-only default.
-- **Enabling fleet sync:** put a synced folder anywhere, `mkdir` a `reminders/`
-  subdir in it, and point `$FIR_SHARED_DIR` at the folder (or use the
-  `~/sync/shared` convention and skip the env var entirely). `$FIR_REMINDERS_SHARD`
-  overrides this host's shard name; the default is the hostname, sanitised to
-  `[A-Za-z0-9._-]`.
+  2. `$XDG_STATE_HOME/fir-reminders/` — the default.
+
+  Nothing else is consulted; no infrastructure path is hardcoded and no
+  well-known directory is probed.
+- **Fleet-wide sharing is deployment config, not a default.** If
+  `$FIR_REMINDERS_STORE` points at a directory synced between machines (a
+  Syncthing or Dropbox folder, a shared mount — the extension neither knows nor
+  cares which), reminders are fleet-wide: one set on any host is visible and
+  closable from any other. If it is unset, everything is local to this machine.
+  `$FIR_REMINDERS_SHARD` overrides this host's shard name (default: hostname,
+  sanitised to `[A-Za-z0-9._-]`).
 - **`done` is absorbing.** Once a reminder is closed anywhere, later
   `snooze`/`delivered` ops for it are ignored no matter what their timestamps
   say — hosts have skewed clocks and a closed reminder must stay closed.
@@ -71,8 +69,8 @@ It is injected machinery, not the user talking. Handle it like this:
 4. **Close the loop** — call `reminder_done` if the reminder is plainly
    handled by this exchange, or `reminder_snooze` if the user defers. Leave it
    pending only if genuinely still outstanding.
-5. **A reminder may surface on more than one host** — the store is fleet-wide
-   but delivery is not de-duplicated. If the user has already dealt with it,
+5. **A reminder may surface on more than one host** — when the store is shared,
+   delivery is still not de-duplicated. If the user has already dealt with it,
    just mark it done and move on; do not treat the repeat as significant.
 
 ### Surfacing style
