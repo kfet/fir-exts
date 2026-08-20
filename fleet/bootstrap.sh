@@ -18,11 +18,14 @@ else
   mkdir -p "$(dirname "$PKG_DIR")"
   git clone --quiet "$REPO" "$PKG_DIR"
 fi
-# a sparse (subdir-installed) clone will not have fleet/ — add it
+# a sparse (subdir-installed) clone will not have fleet/ — add it. Note fir's
+# clones are non-cone mode, where `sparse-checkout add` rejects leading-slash
+# patterns and `checkout .` does not re-apply skip-worktree — reapply does.
 if [ "$(git -C "$PKG_DIR" config --get core.sparseCheckout || echo false)" = true ]; then
-  git -C "$PKG_DIR" sparse-checkout add /fleet/ 2>/dev/null \
-    || printf '/fleet/\n' >>"$PKG_DIR/.git/info/sparse-checkout"
-  git -C "$PKG_DIR" checkout --quiet .
+  SC="$PKG_DIR/.git/info/sparse-checkout"
+  grep -qxF '/fleet/' "$SC" 2>/dev/null || printf '/fleet/\n' >>"$SC"
+  git -C "$PKG_DIR" sparse-checkout reapply 2>/dev/null \
+    || git -C "$PKG_DIR" read-tree -mu HEAD
 fi
 chmod +x "$PKG_DIR/fleet/converge.sh"
 
