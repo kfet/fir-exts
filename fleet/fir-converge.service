@@ -1,0 +1,6 @@
+[Unit]
+Description=fir fleet convergence (pull model)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/fir/packages/git/github.com/kfet/fir-exts/fleet/converge.sh
