@@ -10,9 +10,22 @@ timer. The clock does not fire a reminder; **waking up does**.
 
 ## Architecture (why it works this way)
 
-- **Store:** `~/.local/state/poe-acp/notes/reminders.jsonl` — append-only op log
-  (`add` / `done` / `snooze` / `delivered`). jsonl is truth, memory is cache.
-  Records replay from the log, so new fields degrade safely on old stores.
+- **Store:** a *directory* of append-only op logs (`add` / `done` / `snooze` /
+  `delivered`). jsonl is truth, memory is cache. Records replay from the log,
+  so new fields degrade safely on old stores.
+- **Fleet-wide, sharded writes / shared reads.** The store lives in
+  `~/sync/shared/reminders/` (Syncthing, ~6 hosts). Each host appends **only**
+  to its own shard `<store>/<hostname>.jsonl`; every read globs `*.jsonl` and
+  reduces the union. Two hosts never write the same file, so Syncthing cannot
+  produce a conflict on it. A reminder set on one host is visible — and
+  closable — from any host.
+  - `FIR_REMINDERS_STORE` — override the store directory. If it names an
+    existing file or ends in `.jsonl`, the old single-file mode is used.
+  - `FIR_REMINDERS_SHARD` — override this host's shard name (default:
+    hostname, sanitised to `[A-Za-z0-9._-]`).
+- **`done` is absorbing.** Once a reminder is closed anywhere, later
+  `snooze`/`delivered` ops for it are ignored no matter what their timestamps
+  say — hosts have skewed clocks and a closed reminder must stay closed.
 - **Delivery:** the `reminders` extension sweeps on `turn_start` (turn already
   in flight) and steers a `[reminders]` user-role block into the live turn.
   This is the proven injection path; the turn is not aborted.
@@ -48,6 +61,9 @@ It is injected machinery, not the user talking. Handle it like this:
 4. **Close the loop** — call `reminder_done` if the reminder is plainly
    handled by this exchange, or `reminder_snooze` if the user defers. Leave it
    pending only if genuinely still outstanding.
+5. **A reminder may surface on more than one host** — the store is fleet-wide
+   but delivery is not de-duplicated. If the user has already dealt with it,
+   just mark it done and move on; do not treat the repeat as significant.
 
 ### Surfacing style
 
@@ -143,8 +159,14 @@ Confirm back with the resolved absolute time, not just the relative one — "in
 is not. Say the scope too, so a `here` reminder's narrower reach is never a
 surprise.
 
-Also be honest about the two structural limits when they matter: delivery is
-lazy (nothing pushes — see Architecture), and the store is per-host, so a
-reminder set here will not fire through a bot on another machine. Both matter
-most for a `repeat` poll: it can only check things reachable *from this host*,
-and it checks on the user's turns, not on the clock.
+Also be honest about the structural limit when it matters: delivery is lazy
+(nothing pushes — see Architecture). The store, however, is **fleet-wide**: a
+reminder set here can fire through a bot on any other synced host, and a
+`repeat` poll may run its check from a host that is not this one.
+
+**Host targeting lives in the reminder TEXT, not in `scope`.** There is no
+host field. If a reminder only makes sense on one machine, say so in the text
+— "only fire on kopitwo", "only in bot-two", "run this on zbox" — and the
+agent reading it is expected to honour that and otherwise stay silent and let
+it re-arm. Same rule for a `repeat` poll whose command only works on one box:
+name the host in the text.

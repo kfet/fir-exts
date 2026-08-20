@@ -7,8 +7,12 @@
 """Reminders — jsonl is truth, memory is cache.
 
 Design (see conversation notes):
-  * store: $FIR_REMINDERS_STORE, else legacy poe-acp path if present, else
-    $XDG_STATE_HOME/fir-reminders/reminders.jsonl — append-only ops log
+  * store: a DIRECTORY of per-host shards (sharded writes, shared reads).
+    $FIR_REMINDERS_STORE, else ~/sync/shared/reminders/ (Syncthing, fleet-wide),
+    else the legacy poe-acp single file if present, else
+    $XDG_STATE_HOME/fir-reminders/. This host appends ONLY to its own shard
+    <store>/<shard_id>.jsonl; reads glob every *.jsonl and reduce the union.
+    No two hosts write the same file, so Syncthing cannot conflict on it.
   * sweep: on session_start (log only) and turn_start (steer into live turn);
     agent_start is kept for other modes but never fires under ACP
   * NO in-process timer: conv sessions are evicted (--session-ttl), so a
@@ -19,46 +23,164 @@ Design (see conversation notes):
 
 from __future__ import annotations
 
+import glob as _glob
 import json
 import os
 import re
+import shutil
+import socket
 import time
 import uuid
 from typing import Any
 
 import fir_ext
 
-def _default_store() -> str:
-    """Store path. Host-agnostic: XDG state dir, overridable by env.
+# ---------------------------------------------------------------- layout
 
-    Legacy poe-acp path is honoured if it already exists, so an in-place
-    upgrade never loses pending reminders.
+LEGACY_POE_ACP = "~/.local/state/poe-acp/notes/reminders.jsonl"
+SHARED_ROOT = "~/sync/shared"
+
+
+def _xdg_state() -> str:
+    return os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+
+
+def _resolve_store() -> tuple[str, str]:
+    """Resolve the store. Returns (mode, path); mode is 'dir' or 'file'.
+
+    Order:
+      1. $FIR_REMINDERS_STORE — a directory, unless it names an existing file
+         or ends in .jsonl (legacy single-file mode, kept working).
+      2. ~/sync/shared/reminders/ when ~/sync/shared exists (Syncthing fleet).
+      3. the legacy poe-acp single file, if it already exists.
+      4. $XDG_STATE_HOME/fir-reminders/ (a directory now, not a file).
     """
     env = os.environ.get("FIR_REMINDERS_STORE")
     if env:
-        return os.path.expanduser(env)
-    legacy = os.path.expanduser("~/.local/state/poe-acp/notes/reminders.jsonl")
+        p = os.path.expanduser(env)
+        if p.endswith(".jsonl") or os.path.isfile(p):
+            return ("file", p)
+        return ("dir", p)
+    shared = os.path.expanduser(SHARED_ROOT)
+    if os.path.isdir(shared):
+        return ("dir", os.path.join(shared, "reminders"))
+    legacy = os.path.expanduser(LEGACY_POE_ACP)
     if os.path.exists(legacy):
-        return legacy
-    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
-    return os.path.join(base, "fir-reminders", "reminders.jsonl")
+        return ("file", legacy)
+    return ("dir", os.path.join(_xdg_state(), "fir-reminders"))
 
 
-STORE = _default_store()
+def _shard_id() -> str:
+    raw = os.environ.get("FIR_REMINDERS_SHARD") or socket.gethostname() or "unknown"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", raw) or "unknown"
+
+
+# Module globals, (re)computed by _init_store(). STORE is the ONE file this
+# host ever appends to — its own shard in dir mode, the file itself in legacy
+# single-file mode.
+STORE_MODE = "dir"
+STORE_DIR = ""
+SHARD_ID = ""
+STORE = ""
+
+
+def _init_store() -> None:
+    """(Re)resolve the store. Called at import; tests call it after setenv."""
+    global STORE_MODE, STORE_DIR, SHARD_ID, STORE
+    STORE_MODE, path = _resolve_store()
+    SHARD_ID = _shard_id()
+    if STORE_MODE == "file":
+        STORE_DIR = os.path.dirname(path)
+        STORE = path
+    else:
+        STORE_DIR = path
+        STORE = os.path.join(STORE_DIR, SHARD_ID + ".jsonl")
+    _state.update({"key": None, "recs": {}, "next_due": float("inf")})
+    if STORE_MODE == "dir":
+        try:
+            _migrate_legacy()
+        except Exception:
+            pass
+
+
+def _migrate_legacy() -> None:
+    """One-time: seed our shard from a pre-existing legacy single file.
+
+    Only runs when our shard does not exist yet, and only for legacy files
+    that live OUTSIDE the store dir (anything inside it is already globbed as
+    a shard — copying that would double-count its ops). The legacy file is
+    left in place, untouched.
+    """
+    if os.path.exists(STORE):
+        return
+    candidates = [
+        os.path.expanduser(LEGACY_POE_ACP),
+        os.path.join(_xdg_state(), "fir-reminders", "reminders.jsonl"),
+    ]
+    for src in candidates:
+        if not os.path.isfile(src):
+            continue
+        if os.path.dirname(os.path.abspath(src)) == os.path.abspath(STORE_DIR):
+            continue
+        os.makedirs(STORE_DIR, exist_ok=True)
+        tmp = STORE + ".migrating"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, STORE)  # atomic: either seeded or not, never partial
+        return
+
 
 # re-nag interval once a reminder has been surfaced but not completed
 RENAG_S = 900
 # after this many deliveries, auto-snooze a day so it stops being noise
 MAX_DELIVERIES = 5
 
-_state: dict[str, Any] = {"mtime": -1.0, "recs": {}, "next_due": float("inf")}
+# "key" is the (path, mtime, size) fingerprint of every shard seen last sweep.
+_state: dict[str, Any] = {"key": None, "recs": {}, "next_due": float("inf")}
+
+_init_store()
 
 
 # ---------------------------------------------------------------- store
 
+# TODO(compaction): the op log is never compacted. If that ever changes, ONLY
+# a shard's owning host may rewrite its own shard — rewriting someone else's
+# shard is exactly the two-writers case Syncthing turns into a .sync-conflict.
+
+
+def _shards() -> list[str]:
+    """Every file we read. Sorted for a stable, deterministic tie-break.
+
+    NOTE: filenames carry no meaning here. `.sync-conflict-*.jsonl` files may
+    appear and are read like any other shard — never parsed, never special.
+    """
+    if STORE_MODE == "file":
+        return [STORE] if os.path.exists(STORE) else []
+    try:
+        return sorted(_glob.glob(os.path.join(STORE_DIR, "*.jsonl")))
+    except OSError:
+        return []
+
+
+def _scan_key() -> tuple:
+    """Cache key over all shards: (path, mtime, size) each, re-globbed.
+
+    Size is load-bearing: mtime has 1s granularity on many filesystems, so
+    two appends within the same second are invisible to mtime alone.
+    """
+    out = []
+    for p in _shards():
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        out.append((p, st.st_mtime, st.st_size))
+    return tuple(out)
+
 
 def _append(op: dict) -> None:
-    os.makedirs(os.path.dirname(STORE), exist_ok=True)
+    d = os.path.dirname(STORE)
+    if d:
+        os.makedirs(d, exist_ok=True)
     op.setdefault("at", int(time.time()))
     line = json.dumps(op, separators=(",", ":")) + "\n"
     fd = os.open(STORE, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
@@ -66,69 +188,104 @@ def _append(op: dict) -> None:
         os.write(fd, line.encode())
     finally:
         os.close(fd)
-    _state["mtime"] = -1.0  # force reload
+    _state["key"] = None  # force reload
+
+
+def _read_ops() -> list[tuple]:
+    """Union of every shard's ops, globally ordered.
+
+    Sort key is (at, shard filename, line number within that shard). The line
+    number IS the per-shard sequence counter — free, monotonic, and needs no
+    `seq` field on the wire. Tolerant: Syncthing ships partial file states, so
+    a remote shard's final line can be torn mid-write. Malformed lines are
+    skipped silently; a torn read must never raise.
+    """
+    ops: list[tuple] = []
+    for path in _shards():
+        name = os.path.basename(path)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                for lineno, line in enumerate(fh):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        op = json.loads(line)
+                    except Exception:
+                        continue  # truncated / half-synced line
+                    if not isinstance(op, dict) or not op.get("id"):
+                        continue
+                    try:
+                        at = float(op.get("at", 0) or 0)
+                    except Exception:
+                        at = 0.0
+                    ops.append((at, name, lineno, op))
+        except OSError:
+            continue
+    ops.sort(key=lambda t: (t[0], t[1], t[2]))
+    return ops
 
 
 def _load(force: bool = False) -> dict:
     """Reduce the op log into current records. Cheap: stat + compare."""
-    try:
-        mtime = os.stat(STORE).st_mtime
-    except FileNotFoundError:
+    key = _scan_key()
+    if not key:
         _state["recs"] = {}
         _state["next_due"] = float("inf")
-        _state["mtime"] = -1.0
+        _state["key"] = None
         return {}
-    if not force and mtime == _state["mtime"]:
+    if not force and key == _state["key"]:
         return _state["recs"]
 
     recs: dict[str, dict] = {}
-    with open(STORE, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                op = json.loads(line)
-            except Exception:
-                continue
-            rid = op.get("id")
-            if not rid:
-                continue
-            kind = op.get("op")
-            if kind == "add":
-                recs[rid] = {
-                    "id": rid,
-                    "text": op.get("text", ""),
-                    "due": float(op.get("due", 0)),
-                    "scope": op.get("scope", "any"),
-                    "repeat": float(op.get("repeat") or 0),
-                    "created": op.get("at", 0),
-                    "status": "pending",
-                    "deliveries": 0,
-                }
-            elif rid in recs:
-                r = recs[rid]
-                if kind == "done":
-                    r["status"] = "done"
-                elif kind == "snooze":
-                    r["due"] = float(op.get("due", r["due"]))
-                    r["status"] = "pending"
-                    if not op.get("auto"):
-                        # An explicit deferral is a fresh start, not another
-                        # nag. Without this, N snoozes silently walk a
-                        # reminder into MAX_DELIVERIES and its cadence
-                        # degrades to 24h. The auto-snooze escape hatch is
-                        # exempt so it stays terminal.
-                        r["deliveries"] = 0
-                elif kind == "delivered":
-                    if op.get("reset"):
-                        r["deliveries"] = 0  # repeating: each cycle starts clean
-                    else:
-                        r["deliveries"] += 1
-                    r["due"] = float(op.get("next_due", r["due"]))
+    # `done` is ABSORBING: once seen for an id, later snooze/delivered ops for
+    # that id are ignored whatever their timestamp. Two hosts with skewed
+    # clocks would otherwise resurrect a closed reminder — a stale `delivered`
+    # from host B sorting after host A's `done` would flip it back to pending.
+    # A repeating reminder re-arms via `delivered`+reset while still pending,
+    # so it is unaffected; `done` remains the only thing that ends a repeat.
+    done_ids: set[str] = set()
+    for _at, _name, _ln, op in _read_ops():
+        rid = op["id"]
+        kind = op.get("op")
+        if kind == "add":
+            recs[rid] = {
+                "id": rid,
+                "text": op.get("text", ""),
+                "due": float(op.get("due", 0) or 0),
+                "scope": op.get("scope", "any"),
+                "repeat": float(op.get("repeat") or 0),
+                "created": op.get("at", 0),
+                "status": "done" if rid in done_ids else "pending",
+                "deliveries": 0,
+            }
+        elif kind == "done":
+            done_ids.add(rid)
+            if rid in recs:
+                recs[rid]["status"] = "done"
+        elif rid in done_ids:
+            continue  # absorbed
+        elif rid in recs:
+            r = recs[rid]
+            if kind == "snooze":
+                r["due"] = float(op.get("due", r["due"]) or 0)
+                r["status"] = "pending"
+                if not op.get("auto"):
+                    # An explicit deferral is a fresh start, not another
+                    # nag. Without this, N snoozes silently walk a
+                    # reminder into MAX_DELIVERIES and its cadence
+                    # degrades to 24h. The auto-snooze escape hatch is
+                    # exempt so it stays terminal.
+                    r["deliveries"] = 0
+            elif kind == "delivered":
+                if op.get("reset"):
+                    r["deliveries"] = 0  # repeating: each cycle starts clean
+                else:
+                    r["deliveries"] += 1
+                r["due"] = float(op.get("next_due", r["due"]) or 0)
 
     _state["recs"] = recs
-    _state["mtime"] = mtime
+    _state["key"] = key
     pend = [r["due"] for r in recs.values() if r["status"] == "pending"]
     _state["next_due"] = min(pend) if pend else float("inf")
     return recs
@@ -243,11 +400,10 @@ def _matches(rec: dict, here: str) -> bool:
 def _sweep(ctx, deliver: bool) -> list[dict]:
     """Return due reminders; when deliver, tombstone-then-inject."""
     now = time.time()
-    if _state["mtime"] >= 0 and now < _state["next_due"]:
-        try:
-            if os.stat(STORE).st_mtime == _state["mtime"]:
-                return []
-        except FileNotFoundError:
+    if _state["key"] is not None and now < _state["next_due"]:
+        # Nothing is due by our own reckoning; only a changed shard set can
+        # change that (another host may have added something due already).
+        if _scan_key() == _state["key"]:
             return []
     recs = _load()
     here = _scope_here(ctx)

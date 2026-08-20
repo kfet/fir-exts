@@ -46,9 +46,25 @@ Durable reminders. **jsonl is truth, memory is cache.**
 
 - Tools: `reminder_add`, `reminder_list`, `reminder_done`, `reminder_snooze`
 - Formats: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch
-- Store: `$FIR_REMINDERS_STORE`, else `$XDG_STATE_HOME/fir-reminders/reminders.jsonl`
-  (a pre-existing legacy `~/.local/state/poe-acp/notes/reminders.jsonl` is honoured
-  so in-place upgrades never lose pending items)
+- Store: a **directory** of per-host shards — `$FIR_REMINDERS_STORE`, else
+  `~/sync/shared/reminders/` when `~/sync/shared` exists (Syncthing, fleet-wide),
+  else a pre-existing legacy `~/.local/state/poe-acp/notes/reminders.jsonl`, else
+  `$XDG_STATE_HOME/fir-reminders/`. If `$FIR_REMINDERS_STORE` names an existing
+  file or ends in `.jsonl`, the old single-file mode is kept, so in-place
+  upgrades never lose pending items.
+- **Sharded writes, shared reads:** this host appends only to
+  `<store>/<shard>.jsonl`, where shard = `$FIR_REMINDERS_SHARD` or the hostname
+  (sanitised to `[A-Za-z0-9._-]`). Reads glob every `*.jsonl` in the store and
+  reduce the union, ordered by `(at, shard filename, line number)`. Since no two
+  hosts write the same file, Syncthing can never conflict on it — and any
+  `.sync-conflict-*.jsonl` that shows up anyway is simply read as one more shard.
+  Half-synced/truncated lines are skipped silently. First run in a shared store
+  copies a legacy single file into this host's shard once, leaving the original
+  in place.
+- `done` is **absorbing**: once a reminder is closed, later `snooze`/`delivered`
+  ops for that id are ignored regardless of timestamp, so skewed host clocks
+  cannot resurrect it. Delivery is *not* de-duplicated across hosts — the same
+  reminder may nag on two machines; closing it anywhere settles it.
 - Delivery: sweep at `turn_start`, steered into the live turn. No daemon, no
   in-process timer — conversation sessions get evicted on idle TTL, so a sleeping
   thread cannot be trusted. **Waking up is the trigger.**
@@ -64,7 +80,9 @@ cannot re-nag forever), unclosed items re-nag at most every 15 min, and auto-sno
 24h kicks in after 5 surfacings.
 
 **Known limit:** punctuality is bounded by session liveness. A reminder due at 15:00
-with no session activity until 18:00 lands at 18:00, labelled overdue.
+with no session activity until 18:00 lands at 18:00, labelled overdue. Fleet
+targeting is likewise not a feature: express it in the reminder text ("only fire
+on kopitwo") and the model reading it honours that.
 
 ### `extreload`
 
