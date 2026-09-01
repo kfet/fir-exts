@@ -95,6 +95,54 @@ with no session activity until 18:00 lands at 18:00, labelled overdue. Fleet
 targeting is likewise not a feature: express it in the reminder text ("only fire
 on kopitwo") and the model reading it honours that.
 
+### `quota-watch`
+
+Makes the agent account for what it is spending. Nothing in a session tells an
+agent how much provider budget is left, so it happily spends the last of it on a
+wasteful plan and the user finds out when a request is refused.
+
+- Tool: `quota_note` — the agent records a reading after checking usage.
+  Command: `/quota` — show recorded readings and how they moved.
+- **It checks nothing itself.** At `turn_end` it decides a check is due and
+  prepends a `[SYS_EXT]` note asking the agent to look up its own budget and
+  report back. Cadence and memory here; the lookup belongs to the agent.
+- Store: `quota-watch-log.json` in the **global** config dir (a budget is
+  account-wide, not per-project). Written atomically via `os.replace`, since
+  several sessions share the file and a torn write reads back as invalid JSON
+  and discards every reading. Concurrent read-append-write can still drop one
+  note; accepted, as locking would cost more than it protects.
+- **Numbers are never interpreted.** `_deltas` compares each key against the
+  same key in the previous reading and reports per-hour movement, so it works
+  for utilization percentages, points, dollars, or whatever a future provider
+  reports. This is what makes "climbing too fast" answerable rather than
+  guesswork — and why the nudge insists the agent pass `numbers`, not just a
+  summary string.
+- **Cost is the gate, not the clock.** An idle session consumes no budget and
+  is never nudged; a busy one is worth interrupting. A slow ceiling on elapsed
+  time (`everyMinutes`) still catches the cheap-but-long session.
+
+Config — `quota-watch.json` in any host config dir (project-local `.fir/` wins);
+all keys optional:
+
+```json
+{
+  "off": false,
+  "firstAfterTurns": 2,
+  "minMinutes": 20,
+  "everyDollars": 2.00,
+  "everyMinutes": 90,
+  "keepNotes": 20
+}
+```
+
+**Why it does not poll (learned the hard way):** an earlier version hit
+Anthropic's `oauth/usage` endpoint on a timer. Wrong twice over — usage
+endpoints are themselves rate-limited, so a fixed short interval times every
+concurrent session earns a 429 and a long backoff, leaving the watchdog blind
+exactly when it matters; and it hardcoded one vendor's JSON shape, making every
+other budget (Poe points, gateway budgets, plain API keys) invisible. Delegating
+to the agent means new providers need no edit to this file.
+
 ### `extreload`
 
 One tool, `ext_reload(name)` — hot-reloads a named extension in the live session
