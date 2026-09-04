@@ -163,3 +163,66 @@ but demo.py is opt-in (`-e demo`). `extreload` is a stopgap until fir exposes
 
 fir enforces two constraints regardless: builtins cannot be reloaded, and an
 extension cannot reload itself (so `extreload` can never reload `extreload`).
+
+### `imagegen`
+
+Image generation as a tool, for text-only agent models. `generate_image(prompt)`
+writes a PNG to `~/imagegen-out/` and returns the path; the agent delivers it via
+the relay's attach directive (poe-acp `<!--poe-attach ... inline-->`).
+
+- Tools: `generate_image`, `image_models`. Command: `/imagegen`.
+- Providers: **OpenRouter** (default) and **Poe**, both via OpenAI-compatible
+  `/chat/completions` with `modalities: ["image","text"]`.
+- Credentials: `OPENROUTER_API_KEY` / `POE_API_KEY`, else the `openrouter` /
+  `poe` slots in `~/.config/fir/auth.json`. Nothing new to provision if fir is
+  already logged in to either.
+
+**Why OpenRouter is the default — budget isolation, not price.** Poe and
+OpenRouter charge the same for the nano-banana family ($0.00003 / $0.00012 per
+image on both). But on a Poe-hosted relay, image spend and the bot's own
+survival draw on one points pool: exhausting it takes the *control channel*
+offline until the month rolls over, and images are the most points-dense thing
+an agent does (~3000 pts ≈ $0.09 per flagship render). Draining OpenRouter only
+costs you images. So **Poe is never selected implicitly** — it must be named per
+call or pinned in config — and a Poe call preflights the points balance and
+refuses below a floor (default 200k).
+
+**Models are not pinned.** Each provider's `/models` is queried live (24h disk
+cache) and filtered to what can genuinely emit images:
+
+- OpenRouter — `architecture.output_modalities ∋ image` (~9 models)
+- Poe — `supported_endpoints ∋ /v1/chat/completions` **and** `pricing.image` set
+
+That second filter is the real asymmetry: most Poe image bots (flux-2-\*,
+gpt-image-2, qwen-image-2, grok-imagine-image) expose *no* OpenAI-compatible
+endpoint at all, so the usable Poe set is 2 models against OpenRouter's 9.
+
+Ranking uses per-image price as a capability proxy — flagships cost more.
+`quality: "best"` takes the priciest, `"fast"` the cheapest, newest breaks ties.
+A new flagship is therefore adopted the day it launches, with no code change and
+no fir release. Pinning is opt-in (`/imagegen model <id>`); if a pinned model
+vanishes from the catalog the tool **fails loudly with the live list** rather
+than substituting, because a different image model is a different product.
+
+Editing works too: pass `image` with a path and the input is sent as an
+`image_url` content part.
+
+**Guardrails, in order of what they protect:** Poe opt-in only; Poe balance
+preflight (protects the relay); provider/model/price echoed in every result
+(spend lands in the transcript); a running per-session count warning — a
+**nudge, not a cap**, since a hard stop mid-task is worse than an extra dollar.
+
+**Switching, mobile-first.** `/imagegen provider openrouter|poe` writes
+`~/.config/fir/imagegen.json`, inherited by every relay on the host; per-call
+`provider`/`model` args cover one-offs ("draw X, use poe"). Deliberately **no
+env-var configuration** — that is a shell-only path, useless to a user on a
+phone, which is exactly who this is for.
+
+**Sharp edges found the hard way:**
+- `gemini-3-pro-image` returns *two* frames — an interim render and the refined
+  final. Only the last is kept unless `all_variants: true`.
+- Extension tool calls default to a 30s host timeout; image models routinely
+  take 30-120s, so the tool declares `timeout=300`.
+- poecdn 403s a bare urllib User-Agent; Poe returns its image as a CDN link in
+  markdown rather than as base64, so both a real UA and link-extraction are
+  needed.
