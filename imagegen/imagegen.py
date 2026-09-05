@@ -41,9 +41,11 @@ lands, with no code change and no fir release.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -298,6 +300,39 @@ def _extract_images(message: dict) -> list[bytes]:
 
 
 # --------------------------------------------------------------------------
+# heartbeat
+# --------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _heartbeat(ctx: "fir_ext.Context", label: str, every: float = 5.0):
+    """Keep the host-side tool_call deadline alive during a silent HTTP wait.
+
+    fir's tool_call timeout is *activity-aware*: any message the extension
+    sends resets it. The host's own keepAlive only covers calls it drives
+    (side_query / call_tool) — an extension blocking in urllib looks dead.
+    A periodic report_progress is therefore both the UI spinner text and the
+    liveness signal, so a slow image model can never be clipped mid-render
+    regardless of the declared timeout.
+    """
+    stop = threading.Event()
+
+    def beat():
+        n = 0
+        while not stop.wait(every):
+            n += 1
+            with contextlib.suppress(Exception):
+                ctx.report_progress(f"{label} {n * int(every)}s")
+
+    t = threading.Thread(target=beat, daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
+# --------------------------------------------------------------------------
 # tools
 # --------------------------------------------------------------------------
 
@@ -343,6 +378,8 @@ def _extract_images(message: dict) -> list[bytes]:
     },
     display_hint={"title_args": [{"name": "prompt", "style": "accent"}], "result_max_lines": 6},
     # Image models routinely take 30-120s; the 30s default would clip them.
+    # The heartbeat below resets this on every beat, so it is a floor on how
+    # long a *silent* call may run, not a ceiling on the render.
     timeout=300,
 )
 def generate_image(params: dict, ctx: fir_ext.Context) -> dict:
@@ -417,7 +454,8 @@ def generate_image(params: dict, ctx: fir_ext.Context) -> dict:
 
     key = _api_key(provider)
     try:
-        resp = _http_json(f"{PROVIDERS[provider]['base']}/chat/completions", key, payload)
+        with _heartbeat(ctx, model_id.split("/")[-1]):
+            resp = _http_json(f"{PROVIDERS[provider]['base']}/chat/completions", key, payload)
     except Exception as exc:
         return _err(f"{provider}/{model_id}: {exc}")
 
@@ -427,7 +465,8 @@ def generate_image(params: dict, ctx: fir_ext.Context) -> dict:
     message = choices[0].get("message") or {}
 
     try:
-        blobs = _extract_images(message)
+        with _heartbeat(ctx, "downloading"):
+            blobs = _extract_images(message)
     except Exception as exc:
         return _err(f"image fetch failed: {exc}")
     if not blobs:

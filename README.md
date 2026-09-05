@@ -222,7 +222,13 @@ phone, which is exactly who this is for.
 - `gemini-3-pro-image` returns *two* frames — an interim render and the refined
   final. Only the last is kept unless `all_variants: true`.
 - Extension tool calls default to a 30s host timeout; image models routinely
-  take 30-120s, so the tool declares `timeout=300`.
+  take 30-120s, so the tool declares `timeout=300` **and** beats a
+  `ctx.report_progress` heartbeat every 5s during the HTTP wait. fir's
+  tool_call deadline is activity-aware — any message from the extension resets
+  it — but the host's own keepAlive covers only calls *it* drives (side_query,
+  call_tool); an extension blocking in urllib looks dead. The heartbeat is
+  therefore both the spinner text and the liveness signal, which turns the
+  declared timeout into a floor on silence rather than a ceiling on the render.
 - poecdn 403s a bare urllib User-Agent; Poe returns its image as a CDN link in
   markdown rather than as base64, so both a real UA and link-extraction are
   needed.
