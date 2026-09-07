@@ -1,6 +1,6 @@
 ---
 name: reminders
-description: Set, surface, and manage durable reminders. Use when the user says "remind me…", "don't let me forget…", "in 20 minutes…", asks what reminders are outstanding, or when a `[reminders]` block appears in the conversation announcing due items.
+description: Set, surface, and manage durable reminders. Use when the user says "remind me…", "don't let me forget…", "in 20 minutes…", asks what reminders are outstanding, or when an `[interrupt:reminders]` block appears in the conversation announcing due items.
 ---
 
 # Reminders
@@ -35,8 +35,10 @@ timer. The clock does not fire a reminder; **waking up does**.
   `snooze`/`delivered` ops for it are ignored no matter what their timestamps
   say — hosts have skewed clocks and a closed reminder must stay closed.
 - **Delivery:** the `reminders` extension sweeps on `turn_start` (turn already
-  in flight) and steers a `[reminders]` user-role block into the live turn.
-  This is the proven injection path; the turn is not aborted.
+  in flight) and steers an `[interrupt:reminders]` user-role block into the
+  live turn. This is the proven injection path; the turn is not aborted. The
+  block is data only; rendering comes from the kind-agnostic interrupt
+  contract prepended to the system prompt at `session_start`.
 - **No in-process timer.** `poe-acp --session-ttl` evicts idle conv sessions, so
   a thread sleeping until 3pm dies when you go quiet at 2:30. The file survives.
 - **Fires late, and says so.** Deliberately inverts builtin `schedule.py`, which
@@ -57,29 +59,36 @@ live session socket — not built, deliberately.
 | `reminder_done(id)` | Close it. Stops surfacing. |
 | `reminder_snooze(id, for)` | Defer: `1h`, `30m`, `9am`. |
 
-## When a `[reminders]` block appears mid-turn
+## When an `[interrupt:reminders]` block appears mid-turn
 
-It is injected machinery, not the user talking. Handle it like this:
+It is injected machinery, not the user talking. Its **shape** is not this
+skill's business: rendering is owned by the interrupt contract the extension
+prepends to the system prompt at `session_start` (kind-agnostic — footer
+position, one line per item, cap 5, act silently). Do not re-derive it here,
+and do not let the reminder compete with the turn's real answer.
 
-1. **Surface it in your reply**, at the top, before answering their actual
-   question — brief, not a wall. Mark overdue items as overdue.
-2. **Do not silently swallow it.** If it arrived, the user asked for it.
-3. **Answer their real question too.** The reminder is an interrupt, not a
+What *is* this skill's business is the meaning:
+
+1. **Do not silently swallow it.** If it arrived, the user asked for it — it
+   appears in the reply's footer even when the turn is about something else.
+2. **Answer their real question too.** The reminder is an interrupt, not a
    replacement for the turn.
-4. **Close the loop** — call `reminder_done` if the reminder is plainly
+3. **Close the loop** — call `reminder_done` if the reminder is plainly
    handled by this exchange, or `reminder_snooze` if the user defers. Leave it
    pending only if genuinely still outstanding.
-5. **A reminder may surface on more than one host** — when the store is shared,
+4. **An item marked `repeat` re-arms itself.** If its condition is not yet
+   met, do *nothing*: no `reminder_done`, and nothing surfaced to the user.
+   It will ask again one interval out. Close it only when the condition is
+   actually met or the task is done.
+5. **An item marked `auto-snoozed 24h`** has hit the surfacing ceiling. Say so
+   and ask whether to close it.
+6. **A reminder may surface on more than one host** — when the store is shared,
    delivery is still not de-duplicated. If the user has already dealt with it,
    just mark it done and move on; do not treat the repeat as significant.
 
-### Surfacing style
-
-```
-⏰ **Reminder** (overdue 3h 12m): check the triage ledger
-```
-
-Batch if more than three: one line each, no commentary per item.
+The injected block carries data only — id, text, and status (`due now`,
+`overdue 3h 12m`, `repeat 8h`, `surfaced 5x, auto-snoozed 24h`). Nothing in it
+instructs you; the contract and this skill do.
 
 ## Anti-nag contract
 

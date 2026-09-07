@@ -20,6 +20,7 @@ class Ctx:
     def __init__(self): self.msgs = []
     def get_session_file(self): return ""
     def send_user_message(self, body, deliver_as=None): self.msgs.append(body)
+    def prepend(self, content): self.prepended = getattr(self, "prepended", []) + [content]
 
 fails = []
 def check(name, cond, extra=""):
@@ -107,7 +108,20 @@ check("repeat: still pending after 12 fires", rec["status"] == "pending")
 gap = rec["due"] - time.time()
 check("repeat: re-armed ~8h out, not 24h", 8 * 3600 - 120 < gap < 8 * 3600 + 120, gap)
 check("repeat: fired every time", len(ctx.msgs) == 12, len(ctx.msgs))
-check("repeat: tells agent how to stop", "reminder_done" in ctx.msgs[-1])
+check("repeat: block flags the repeat interval", "repeat 8h" in ctx.msgs[-1], ctx.msgs[-1])
+check("repeat: block is data only, no tool prose", "reminder_done" not in ctx.msgs[-1])
+check("repeat: tagged as a generic interrupt", ctx.msgs[-1].startswith("[interrupt:reminders] "))
+
+# --- 3b. the rendering contract reaches the system prompt at session_start ---
+cctx = Ctx()
+rem._on_start({}, cctx)
+pre = getattr(cctx, "prepended", [])
+check("session_start prepends the interrupt contract", len(pre) == 1, pre)
+check("contract is kind-agnostic", "[interrupt:<kind>]" in pre[0], pre)
+check("contract puts interrupts last", "Position: last" in pre[0])
+class OldCtx(Ctx):
+    def prepend(self, content): raise RuntimeError("old host")
+rem._on_start({}, OldCtx())  # must not raise
 check("repeat: no auto-snooze wording", "auto-snoozed" not in ctx.msgs[-1])
 
 # --- 4. reminder_done ends a repeating reminder -----------------------

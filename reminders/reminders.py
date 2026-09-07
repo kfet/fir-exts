@@ -452,35 +452,27 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
                     "reset": True,
                 }
             )
-            when = "due now" if late < 60 else f"overdue by {_ago(late)}"
-            lines.append(
-                f"- [{r['id']}] {r['text']}  ({when}; repeats every "
-                f"{_ago(rep)} — call reminder_done({r['id']}) once it is "
-                f"handled or its condition is met, otherwise do nothing "
-                f"and it will ask again)"
-            )
+            when = "due now" if late < 60 else f"overdue {_ago(late)}"
+            lines.append(f"- [{r['id']}] {r['text']}  ({when}; repeat {_ago(rep)})")
             continue
         if n >= MAX_DELIVERIES:
             _append({"op": "snooze", "id": r["id"], "due": int(now + 86400), "auto": True})
             lines.append(
-                f"- [{r['id']}] {r['text']} (overdue {_ago(late)}; "
-                f"surfaced {n}x — auto-snoozed 24h, close it with reminder_done)"
+                f"- [{r['id']}] {r['text']}  (overdue {_ago(late)}; "
+                f"surfaced {n}x, auto-snoozed 24h)"
             )
             continue
         # tombstone BEFORE surfacing: a crash mid-inject must not re-nag forever
         _append(
             {"op": "delivered", "id": r["id"], "next_due": int(now + RENAG_S)}
         )
-        when = "due now" if late < 60 else f"overdue by {_ago(late)}"
+        when = "due now" if late < 60 else f"overdue {_ago(late)}"
         lines.append(f"- [{r['id']}] {r['text']}  ({when})")
 
-    body = (
-        "[reminders] "
-        + f"{len(lines)} reminder(s) due:\n"
-        + "\n".join(lines)
-        + "\nSurface these to the user in your reply. "
-        + "Use reminder_done(id) when handled, reminder_snooze(id, '1h') to defer."
-    )
+    # DATA ONLY. Rendering is owned by the interrupt contract prepended at
+    # session_start (_CONTRACT); semantics are owned by SKILL.md. Adding
+    # prose here is what made reminders compete with the turn's real answer.
+    body = f"[interrupt:reminders] {len(lines)} due\n" + "\n".join(lines)
     try:
         ctx.send_user_message(body, deliver_as="steer")
     except Exception:
@@ -491,9 +483,38 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
     return due
 
 
+# Rendering contract for ANY mid-turn injected block, not just ours. It is
+# deliberately kind-agnostic: an extension emitting `[interrupt:<kind>]`
+# inherits it for free. It must reach the system prompt BEFORE an interrupt
+# can arrive — a lazily-read skill is too late — hence ctx.prepend() at
+# session_start rather than SKILL.md. If fir ever adopts this into core,
+# delete the prepend and keep the block format.
+_CONTRACT = """\
+Injected interrupts. A `[interrupt:<kind>]` block appearing mid-turn is \
+machinery, not the user speaking. Render it under these rules, whatever \
+the surface:
+- Position: last. It never precedes your answer. The opening of a reply is \
+what the user is waiting for and what a notification previews; an interrupt \
+did not earn that slot.
+- Budget: one line per item. No commentary, no per-item narration, no \
+acknowledgement that an interrupt occurred.
+- Cap: 5 items. Beyond that show 5 and a `+N more` count.
+- Degenerate case: if the turn has no other content, the interrupt IS the \
+reply — no separator, no preamble.
+- Act silently using the kind's own tools; mention an action only if you \
+actually took one.
+Suggested shape on a markdown surface: a `---` rule, then a bold kind label \
+and the items, each with its status in italics.\
+"""
+
+
 @fir_ext.on("session_start")
 def _on_start(params, ctx):
     _load(force=True)
+    try:
+        ctx.prepend(_CONTRACT)
+    except Exception:
+        pass  # old host without prepend_context: block still degrades to data
 
 
 # NOTE (verified 2026-08-01, remdebug probe): `agent_start` NEVER fires in
