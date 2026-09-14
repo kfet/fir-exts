@@ -59,6 +59,39 @@ for rc in "$HOME/.profile" "$HOME/.zshenv"; do
   grep -qxF "$STANZA" "$rc" || { printf '%s\n' "$STANZA" >>"$rc"; echo "added fleet env stanza to $rc"; }
 done
 
+# 2b. ensure the package is REGISTERED with fir, not merely cloned.
+# A clone that no settings.json references is inert: extensions never load and
+# skills never match. bootstrap.sh registers, but only `if [ -f settings.json ]`
+# — so a host bootstrapped before it ever ran fir was silently skipped forever.
+# Do it here instead, where it self-heals on every run, and create the file if
+# it is missing.
+reason='package registration failed'
+S="$CFG/fir/settings.json"
+if command -v python3 >/dev/null 2>&1; then
+  mkdir -p "$(dirname "$S")"
+  [ -f "$S" ] || printf '{}\n' >"$S"
+  python3 - "$S" <<'PY'
+import json, sys, os, tempfile
+p = sys.argv[1]
+try:
+    d = json.load(open(p))
+except Exception as e:                       # never clobber a file we cannot parse
+    print("settings.json unreadable (%s) — skipping registration" % e); sys.exit(0)
+if not isinstance(d, dict):
+    print("settings.json is not an object — skipping registration"); sys.exit(0)
+pkgs = d.setdefault("packages", [])
+def src(x): return x.get("source") if isinstance(x, dict) else x
+if not any((src(x) or "").startswith("github.com/kfet/fir-exts") for x in pkgs):
+    pkgs.append("github.com/kfet/fir-exts")
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p) or ".")
+    with os.fdopen(fd, "w") as fh:
+        json.dump(d, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, p)                       # atomic: a live fir never sees a half file
+    print("registered github.com/kfet/fir-exts in settings.json")
+PY
+fi
+
 # 3. render env file -> expanded KEY=VALUE (only the vars it actually sets)
 reason='env render failed'
 [ -f "$ENV_FILE" ] || { echo "no $ENV_FILE — nothing to render"; exit 0; }

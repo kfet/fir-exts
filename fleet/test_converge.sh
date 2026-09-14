@@ -86,6 +86,58 @@ printf '%s\t\tbranch '\''main'\'' of origin\n%s\t\tbranch '\''main'\'' of origin
   >"$PKG/.git/FETCH_HEAD"
 out=$(run); check "ignores a poisoned FETCH_HEAD" $? "$out"
 
+# --- package registration (step 2b) -------------------------------------
+# The bug this guards: converge pulls the clone but nothing registers it, so
+# extensions and skills stay inert. Must also work with NO settings.json.
+FS="$H/.config/fir/settings.json"
+[ -f "$FS" ]; check "creates settings.json when absent" $? "$FS missing"
+python3 -c "
+import json,sys
+p=json.load(open('$FS')).get('packages',[])
+sys.exit(0 if any('github.com/kfet/fir-exts' in str(x) for x in p) else 1)"
+check "registers fir-exts when settings.json was absent" $?
+
+# idempotent: three more runs must not duplicate the entry
+run >/dev/null 2>&1; run >/dev/null 2>&1; run >/dev/null 2>&1
+n=$(python3 -c "
+import json
+p=json.load(open('$FS')).get('packages',[])
+print(sum(1 for x in p if 'github.com/kfet/fir-exts' in str(x)))")
+[ "$n" = 1 ]; check "registration is idempotent across runs" $? "found $n entries"
+
+# must PRESERVE unrelated settings rather than rewriting the file wholesale
+python3 -c "
+import json
+p='$FS'; d=json.load(open(p)); d['theme']='mytheme'
+d['skills']=['/some/local/skill']; json.dump(d,open(p,'w'),indent=2)"
+run >/dev/null 2>&1
+python3 -c "
+import json,sys
+d=json.load(open('$FS'))
+sys.exit(0 if d.get('theme')=='mytheme' and d.get('skills')==['/some/local/skill'] else 1)"
+check "preserves unrelated settings keys" $?
+
+# a corrupt settings.json must be left ALONE, not clobbered — and not fail the run
+cp "$FS" "$T/settings.good"
+printf 'this is not json{{{' >"$FS"
+out=$(run); rc=$?
+[ "$rc" = 0 ]; check "survives an unparseable settings.json" $? "rc=$rc out=$out"
+grep -q 'not json{{{' "$FS"; check "does not clobber an unparseable settings.json" $? "$(cat "$FS")"
+cp "$T/settings.good" "$FS"
+
+# an existing registration recorded as an OBJECT (not a bare string) counts
+python3 -c "
+import json
+p='$FS'; d=json.load(open(p))
+d['packages']=[{'source':'github.com/kfet/fir-exts','scope':'user'}]
+json.dump(d,open(p,'w'),indent=2)"
+run >/dev/null 2>&1
+n=$(python3 -c "
+import json
+p=json.load(open('$FS')).get('packages',[])
+print(sum(1 for x in p if 'github.com/kfet/fir-exts' in str(x)))")
+[ "$n" = 1 ]; check "recognises an object-form registration" $? "found $n entries"
+
 # induced failure: unreachable git origin => FAIL status, nonzero exit
 git -C "$PKG" remote set-url origin "$T/nope"
 out=$(run); rc=$?
