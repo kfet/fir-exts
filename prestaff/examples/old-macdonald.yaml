@@ -1,0 +1,46 @@
+title: Old MacDonald Had a Song
+page: 22
+practice_steps_y: 15
+title_y: 74
+eye_check_y: 84
+find_keys_y: 46
+system_y: 108
+
+practice_steps:
+  - "1. On the closed keyboard lid, play and say finger numbers."
+  - "   Feel the whole notes by saying \u201ctwo-oo-oo-oo\u201d for this finger."
+  - "2. On the keyboard, play and count."
+  - "3. Play and sing the words."
+
+find_keys:
+  lh: [3, 2]
+  rh: [2, 3, 4]
+
+eye_check:
+  - "Ask your teacher to watch your eyes as you play."
+  - "Did you have to look down?"
+
+# --- the notation itself -------------------------------------------------
+# <finger><duration>   duration: q = quarter, h = half, w = whole
+notes:
+  - {hand: RH, dyn: f, seq: "2q 2q 2q"}
+  - {hand: LH, seq: "3q 2q 2q 3h"}
+  - {hand: RH, seq: "4q 4q 3q 3q 2w", lyric_display: true,
+     lyric_colors: ["#C0392B", "#111111", "#1E8449", "#111111", "#C0392B"]}
+
+# one syllable per note, in playing order; '-' marks a hyphen
+lyrics:
+  - "Old Mac- Don- ald had a song, e- i- e- i- O"
+  - "Played his key- board all a long,"
+
+count: "(2 - 3 - 4)"
+repeat: true
+
+callout:
+  x: 196
+  y: 150
+  title: "Repeat sign"
+  lines:
+    - "These dots mean to go"
+    - "back to the beginning"
+    - "and play once again."
