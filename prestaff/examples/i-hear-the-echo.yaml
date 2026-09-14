@@ -1,0 +1,91 @@
+title: I Hear the Echo
+page: 20
+title_x: 150
+title_y: 62
+pitch_step: 1.35
+
+intro:
+  y: 16
+  lines:
+    - "Loud and soft sounds make"
+    - "music more interesting."
+
+terms:
+  y: 30
+  cols:
+    - {x: 0,  head: "Forte means loud.",  sym: "f", gloss: "= forte"}
+    - {x: 42, head: "Piano means soft.",  sym: "p", gloss: "= piano"}
+
+bullet:
+  y: 52
+  text: "Circle the f and p signs below."
+
+find_keys_x: 176
+find_keys_y: 20
+find_keys_w: 66
+find_keys:
+  groups: [3, 2, 3]
+  labels: [[4, 3, 2], [], [2, 3, 4]]
+  brackets:
+    - {group: 0, text: "L.H."}
+    - {group: 2, text: "R.H."}
+
+# --- the notation ---------------------------------------------------------
+# Both hands play the same 8-beat pattern: four quarters, then two halves.
+systems:
+  - y: 84
+    x: 40
+    lyric_pos: below
+    groups:
+      - {hand: RH, dyn: f, seq: "2q 2q 3q 3q 4h 4h"}
+      - {hand: RH, dyn: p, seq: "2q 2q 3q 3q 4h 4h", gap: 10}
+    lyrics:
+      - "Shout a- cross the val- ley, Now I hear the ech- o."
+
+  - y: 110
+    x: 40
+    lyric_pos: above
+    groups:
+      - {hand: LH, dyn: f, seq: "2q 2q 3q 3q 4h 4h"}
+      - {hand: LH, dyn: p, seq: "2q 2q 3q 3q 4h 4h", gap: 10}
+    lyrics:
+      - "Play the mu- sic loud- ly, Now I hear the ech- o."
+    barline: true
+
+discovery:
+  y: 156
+  rhythm: "q q q q h h"
+  before: "This rhythm pattern"
+  after: "occurs four times. Circle each time this pattern appears."
+
+staff:
+  x: 18
+  y: 172
+  width: 258
+  space: 2.5
+  clef: bass
+  flats: 6
+  time: "4/4"
+  labels:
+    - {x: 18, y: 166, text: "Teacher Duet: (Student plays 1 octave higher)"}
+    - {x: 40, y: 171, text: "R.H.", size: 3.0}
+    - {x: 40, y: 192, text: "L.H.", size: 3.0}
+    - {x: 44, y: 197, text: "mf", size: 4.4, style: italic}
+    - {x: 53, y: 199, text: "with pedal", size: 3.0, weight: normal, style: italic}
+    - {x: 104, y: 197, text: "p", size: 4.4, style: italic}
+    - {x: 160, y: 202, text: "mf", size: 4.4, style: italic}
+    - {x: 217, y: 202, text: "p", size: 4.4, style: italic}
+  voices:
+    - stem: up
+      fingers: {"0": "3"}
+      slurs: [[0, 5], [6, 11], [12, 17], [18, 23]]
+      seq: "Bb3q Bb3q Bb3q Bb3q | Db4h Cb4h |
+            Bb3q Bb3q Bb3q Bb3q | Db4h Cb4h |
+            Bb3q Bb3q Bb3q Bb3q | Db4h Cb4h |
+            Bb3q Bb3q Bb3q Bb3q | Db4h Cb4h"
+    - stem: down
+      fingers: {"0": "5", "3": "2"}
+      seq: "Ab2h Db3h | Gb2q Db3q Eb3q Db3q |
+            Ab2h Db3h | Gb2q Db3q Eb3q Db3q |
+            Ab2h Db3h | Gb2q Db3q Eb3q Db3q |
+            Ab2h Db3h | Gb2q Db3q Eb3h"

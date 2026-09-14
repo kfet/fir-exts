@@ -232,3 +232,26 @@ phone, which is exactly who this is for.
 - poecdn 403s a bare urllib User-Agent; Poe returns its image as a CDN link in
   markdown rather than as base64, so both a real UA and link-extraction are
   needed.
+
+## Skills (no extension)
+
+### `prestaff`
+
+Renders beginner piano method-book pages — pre-staff finger-number notation
+(noteheads and stems, no staff lines, finger numbers, lyrics, hand labels) and
+conventional staff systems for the teacher duet — to SVG/PDF/PNG from a small
+YAML notation.
+
+- `prestaff.py song.yaml out.svg --png --pdf` — the renderer. Millimetre
+  coordinates, page-sized viewBox, so PDFs print at true size.
+- `measure.py heads|staff photo.jpg x0,y0,x1,y1 dbg.png` — reads notehead
+  positions (and, for real staves, a per-column 5-line comb that tracks the
+  curl of a photographed page) so a recreation can be *checked* against the
+  original rather than eyeballed.
+
+The notation encodes the rules the books actually follow, which were measured
+rather than assumed: stem direction is the hand, the finger number is the
+pitch, and **L.H. pitch falls as the finger number rises**.
+
+Deps are ephemeral via `uv run --with pyyaml --with cairosvg` (plus
+`pillow scipy numpy` for `measure.py`); nothing is installed globally.
