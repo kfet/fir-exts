@@ -24,6 +24,7 @@ export FIR_REMINDERS_STORE="$HOME/sync/shared/reminders"
 EOF
 
 run() { HOME="$H" XDG_CONFIG_HOME="$H/.config" FIR_FLEET_PKG_DIR="$PKG" \
+        FIR_FLEET_FIR_BIN="${FIR_STUB:-$T/no-fir}" \
         FIR_FLEET_DIR="$H/sync/shared/fleet" FIR_CONVERGE_REEXEC=1 \
         sh "$PKG/fleet/converge.sh" 2>&1; }
 
@@ -137,6 +138,22 @@ import json
 p=json.load(open('$FS')).get('packages',[])
 print(sum(1 for x in p if 'github.com/kfet/fir-exts' in str(x)))")
 [ "$n" = 1 ]; check "recognises an object-form registration" $? "found $n entries"
+
+# client-version-gate reporting via a stub fir
+FIR_STUB="$T/fir"; G="$H/sync/shared/fleet/status/$(hostname -s 2>/dev/null || hostname).gates"
+stub() { # $1 = help text, $2 = gates output
+  printf '#!/bin/sh\ncase "$1" in --help) echo "%s" ;; doctor) printf "%s" ;; *) echo PROMPT-RAN >"%s" ;; esac\n' \
+    "$1" "$2" "$T/prompt-ran" >"$FIR_STUB"; chmod +x "$FIR_STUB"; }
+stub '  fir doctor client-version-gates  Report' 'client-version-gate key=claudeCode pin=2.1.280\n'
+run >/dev/null 2>&1
+grep -q 'pin=2.1.280' "$G" 2>/dev/null; check "publishes unresolved gates" $? "$(cat "$G" 2>/dev/null)"
+stub '  fir doctor client-version-gates  Report' ''
+run >/dev/null 2>&1
+[ ! -e "$G" ]; check "removes gates file once resolved" $?
+stub '  fir sessions [list]' 'client-version-gate pin=9\n'
+run >/dev/null 2>&1
+[ ! -e "$G" ] && [ ! -e "$T/prompt-ran" ]; check "older fir without the subcommand is never invoked" $?
+FIR_STUB=
 
 # induced failure: unreachable git origin => FAIL status, nonzero exit
 git -C "$PKG" remote set-url origin "$T/nope"

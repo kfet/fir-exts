@@ -3,7 +3,8 @@
 #   1. git pull the fir-exts package (re-exec if this script changed)
 #   2. ensure the `. ~/sync/shared/fleet/env` stanza in ~/.profile and ~/.zshenv
 #   3. render that env file into environment.d (Linux) / launchctl (macOS)
-#   4. always write ~/sync/shared/fleet/status/<host>.status
+#   4. always write ~/sync/shared/fleet/status/<host>.status, plus
+#      <host>.gates while fir has unresolved client-version-gate records
 # Silent and cheap when nothing changed. Safe to re-run.
 set -eu
 
@@ -13,6 +14,8 @@ ENV_FILE="$FLEET_DIR/env"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}"
 HOST=$(hostname -s 2>/dev/null || hostname)
 STATUS="$FLEET_DIR/status/$HOST.status"
+GATES="$FLEET_DIR/status/$HOST.gates"
+FIR_BIN="${FIR_FLEET_FIR_BIN:-$(command -v fir 2>/dev/null || echo "$HOME/.local/bin/fir")}"
 STANZA='[ -f "$HOME/sync/shared/fleet/env" ] && . "$HOME/sync/shared/fleet/env"'
 LEGACY='export FIR_REMINDERS_STORE="$HOME/sync/shared/reminders"'
 case "$(uname -s)" in Darwin) RENDERED="$CFG/fir-fleet/50-fleet.conf" ;;
@@ -25,8 +28,22 @@ finish() {
   sha=$(git -C "$PKG_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)
   [ "$rc" -eq 0 ] && st=ok || st="FAIL $reason"
   printf '%s %s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOST" "$sha" "$st" >"$STATUS"
+  report_gates || true
 }
 trap finish EXIT
+
+# Anthropic gates models on the claude-cli version fir advertises; fir records
+# each rejection in its doctor log. Publish this host's UNRESOLVED ones next to
+# its status so a rejection nobody watched still reaches whoever bumps the pin.
+# The file exists only while there is something to say, and fir clears it by
+# itself once the effective pin moves past the rejected one. The --help probe
+# keeps an older fir (no such subcommand) from treating the args as a prompt.
+report_gates() {
+  [ -x "$FIR_BIN" ] || return 0
+  "$FIR_BIN" --help 2>/dev/null | grep -q 'fir doctor client-version-gates' || return 0
+  g=$("$FIR_BIN" doctor client-version-gates 2>/dev/null) || return 0
+  if [ -n "$g" ]; then printf '%s\n' "$g" >"$GATES"; else rm -f "$GATES"; fi
+}
 
 # 1. pull, and re-exec ourselves if this very script moved.
 # NEVER `git pull`: it decides what to merge by reading FETCH_HEAD, which git

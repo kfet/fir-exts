@@ -64,6 +64,11 @@ next pull picks it up, and the script re-execs itself if it changed mid-run.
    `poe-acp*.service` units (discovered, never hardcoded).
 4. Always write `~/sync/shared/fleet/status/<host>.status` (trap, so failures are
    recorded too): `<ISO-UTC> <host> <sha> ok|FAIL <reason>`.
+   Alongside it, `<host>.gates` holds the output of
+   `fir doctor client-version-gates` — Anthropic rejections of the claude-cli
+   version this host advertised that the current pin has not yet moved past.
+   The file exists only while there is something to report and disappears by
+   itself once the pin is bumped. Skipped on a fir too old to have the subcommand.
 
 A converged run prints nothing and touches nothing but the status file. A stale
 timestamp means a straggler; `FAIL` is visible fleet-wide.
@@ -79,6 +84,7 @@ Harmless on a host with no `poe-acp` units — most of the fleet has none.
 
 ```sh
 cat ~/sync/shared/fleet/status/*.status | sort -k2
+cat ~/sync/shared/fleet/status/*.gates 2>/dev/null   # empty = no host is gated out
 ```
 
 ## Tests
