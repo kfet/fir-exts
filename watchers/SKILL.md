@@ -1,6 +1,6 @@
 ---
 name: watchers
-description: Set, surface, and manage durable reminders and watchers. Use when the user says "remind me…", "don't let me forget…", "in 20 minutes…", "tell me when a file lands in…", asks what reminders/watchers are outstanding, or when an `[interrupt:reminders]` / `[interrupt:dir]` block appears in the conversation.
+description: Set, surface, and manage durable reminders and watchers (all via watcher_add / watcher_list / watcher_remove / watcher_snooze). Use when the user says "remind me…", "don't let me forget…", "in 20 minutes…", "tell me when a file lands in…", asks what reminders/watchers are outstanding, or when an `[interrupt:reminders]` / `[interrupt:dir]` block appears in the conversation.
 ---
 
 # Watchers (reminders + dir)
@@ -58,10 +58,15 @@ live session socket — not built, deliberately.
 
 | Tool | Use |
 |---|---|
-| `reminder_add(text, due, scope, repeat)` | `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `any` (**default**, first live session that wakes) or `here` (this conversation only — see the dead-letter warning below). `repeat`: optional interval (`8h`, `1d`) — see [Recurring and conditional reminders](#recurring-and-conditional-reminders). |
-| `reminder_list(all)` | Pending for this conversation; `all=true` for done + other scopes. |
-| `reminder_done(id)` | Close it. Stops surfacing. |
-| `reminder_snooze(id, for)` | Defer: `1h`, `30m`, `9am`. |
+| `watcher_add(kind="time", text, due, scope, repeat)` | A reminder. `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `any` (**default**, first live session that wakes) or `here` (this conversation only — see the dead-letter warning below). `repeat`: optional interval (`8h`, `1d`) — see [Recurring and conditional reminders](#recurring-and-conditional-reminders). |
+| `watcher_add(kind="dir", target, scope, interval)` | A dir watcher — see [Dir watchers](#dir-watchers). |
+| `watcher_list(all)` | Pending reminders for this conversation + active watchers; `all=true` for done + other scopes. |
+| `watcher_remove(id)` | Close a reminder (`r…`) or stop a watcher (`w…`). Stops surfacing; ends repeats. |
+| `watcher_snooze(id, for)` | Defer a reminder: `1h`, `30m`, `9am`. |
+
+There is no `reminder_add` tool any more: "remind me…" means `watcher_add(kind="time")`.
+It writes the same `add` op the old tool did, so hosts still on the legacy
+reminders extension fire it too.
 
 ## When an `[interrupt:reminders]` block appears mid-turn
 
@@ -77,11 +82,11 @@ What *is* this skill's business is the meaning:
    appears in the reply's footer even when the turn is about something else.
 2. **Answer their real question too.** The reminder is an interrupt, not a
    replacement for the turn.
-3. **Close the loop** — call `reminder_done` if the reminder is plainly
-   handled by this exchange, or `reminder_snooze` if the user defers. Leave it
+3. **Close the loop** — call `watcher_remove` if the reminder is plainly
+   handled by this exchange, or `watcher_snooze` if the user defers. Leave it
    pending only if genuinely still outstanding.
 4. **An item marked `repeat` re-arms itself.** If its condition is not yet
-   met, do *nothing*: no `reminder_done`, and nothing surfaced to the user.
+   met, do *nothing*: no `watcher_remove`, and nothing surfaced to the user.
    It will ask again one interval out. Close it only when the condition is
    actually met or the task is done.
 5. **An item marked `auto-snoozed 24h`** has hit the surfacing ceiling. Say so
@@ -101,14 +106,14 @@ A surfaced-but-unclosed reminder re-nags at most every **15 minutes**, and after
 you learn to ignore is worse than no reminder. If something has been surfaced
 repeatedly, say so and ask whether to close it.
 
-An **explicit** `reminder_snooze` resets that surfacing counter — deferring
+An **explicit** `watcher_snooze` resets that surfacing counter — deferring
 something is a fresh start, not another nag, so a repeatedly-deferred reminder
 keeps its cadence instead of silently decaying into the 24h floor. The
 automatic 24h snooze is exempt, so the escape hatch stays terminal.
 
 A reminder with `repeat` set is outside this contract entirely: it re-arms one
 interval out every time it fires, resets its counter, and never auto-snoozes.
-It ends only at `reminder_done`.
+It ends only at `watcher_remove`.
 
 ## Recurring and conditional reminders
 
@@ -123,13 +128,14 @@ comes back up). Do not build a daemon for this. Write the check into the
 reminder text and let the future agent run it:
 
 ```
-reminder_add(
+watcher_add(
+  kind="time",
   due="8h", repeat="8h", scope="any",
   text="CHECK: run `tailscale status --json` and look at kfetphoneair. "
        "HOME if CurAddr is on 192.168.50.x or relay is `sea`. "
-       "IF NOT HOME: say nothing to the user, do not call reminder_done — "
+       "IF NOT HOME: say nothing to the user, do not call watcher_remove — "
        "this re-arms itself in 8h. "
-       "IF HOME: deliver <payload> and call reminder_done(<id>).")
+       "IF HOME: deliver <payload> and call watcher_remove(<id>).")
 ```
 
 Why this beats a background watcher: the condition is **persistent**, not a

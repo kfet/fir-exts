@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ---
 # name: watchers
-# description: Watchers (reminders, dir) with lazy catch-up interrupt delivery.
+# description: Reminders + watchers (watcher_add kind=time|dir) with lazy catch-up interrupt delivery.
 # modes: tui, text, acp
 # ---
 """Watchers — jsonl is truth, memory is cache.
@@ -493,8 +493,8 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
         n = r["deliveries"] + 1
         if rep:
             # Recurring / poll-until-true: re-arm one interval out and reset
-            # the nag counter. It never auto-snoozes; only reminder_done ends
-            # it. This is what a conditional check ("am I home yet?") needs.
+            # the nag counter. It never auto-snoozes; only watcher_remove
+            # ends it. This is what a conditional check ("am I home yet?") needs.
             _append(
                 {
                     "op": "delivered",
@@ -723,45 +723,14 @@ def _start_producers() -> None:
 # ---------------------------------------------------------------- tools
 
 
-@fir_ext.tool(
-    "reminder_add",
-    "Create a durable reminder. Fires on the next turn at/after its due time "
-    "(late delivery is reported as overdue, never dropped).",
-    {
-        "type": "object",
-        "properties": {
-            "text": {"type": "string", "description": "What to remind about."},
-            "due": {
-                "type": "string",
-                "description": "When: '45m', '1h30m', '2pm', '14:00', "
-                "'tomorrow 9am', ISO datetime, or epoch seconds.",
-            },
-            "scope": {
-                "type": "string",
-                "description": "'any' (DEFAULT: fires in the first live "
-                "session that wakes at/after the due time, wherever the user "
-                "shows up) or 'here' (this conversation ONLY). Use 'here' "
-                "only when the reminder is meaningless outside this thread "
-                "AND you expect to still be in it. A 'here' reminder is "
-                "silently stranded forever if the conversation is deleted or "
-                "simply not revisited by the due time.",
-            },
-            "repeat": {
-                "type": "string",
-                "description": "Optional repeat interval ('8h', '1d', '30m'). "
-                "The reminder re-arms itself this far out every time it "
-                "fires and NEVER auto-expires — it stops only when you call "
-                "reminder_done. Use it for recurring nudges, and for "
-                "poll-until-true checks where the reminder text tells the "
-                "future agent what to test (e.g. run a command; if the "
-                "condition does not hold, say nothing and let it re-arm). "
-                "Prefer this over done+re-add.",
-            },
-        },
-        "required": ["text", "due"],
-    },
-)
-def reminder_add(args, ctx):
+_TIME_KINDS = ("time", "reminder", "reminders")
+
+
+def _add_time(args, ctx):
+    """Time kind: writes the SAME legacy `add` op reminder_add always wrote,
+    so hosts still running the old reminders extension read and fire it."""
+    if not args.get("text") or not args.get("due"):
+        return "kind='time' needs `text` and `due` (e.g. due='45m', '2pm', 'tomorrow 9am')."
     due = parse_due(str(args["due"]))
     scope = str(args.get("scope") or "any")
     scope = _scope_here(ctx) if scope in ("here", "conv") else "any"
@@ -777,16 +746,8 @@ def reminder_add(args, ctx):
         if rep <= 0:
             raise ValueError(f"bad repeat interval: {raw!r}")
     rid = "r" + uuid.uuid4().hex[:6]
-    _append(
-        {
-            "op": "add",
-            "id": rid,
-            "text": str(args["text"]),
-            "due": int(due),
-            "scope": scope,
-            "repeat": rep,
-        }
-    )
+    _append({"op": "add", "id": rid, "text": str(args["text"]), "due": int(due),
+             "scope": scope, "repeat": rep})
     _load(force=True)
     return (
         f"Reminder [{rid}] set for {time.strftime('%Y-%m-%d %H:%M', time.localtime(due))} "
@@ -797,113 +758,53 @@ def reminder_add(args, ctx):
 
 
 @fir_ext.tool(
-    "reminder_list",
-    "List reminders. Shows pending ones (due and upcoming) for this "
-    "conversation plus any global ones.",
-    {
-        "type": "object",
-        "properties": {
-            "all": {
-                "type": "boolean",
-                "description": "Include done reminders and other scopes.",
-            }
-        },
-    },
-)
-def reminder_list(args, ctx):
-    recs = _load(force=True)
-    here = _scope_here(ctx)
-    show_all = bool(args.get("all"))
-    now = time.time()
-    rows = [
-        r
-        for r in recs.values()
-        if show_all or (r["status"] == "pending" and _matches(r, here))
-    ]
-    if not rows:
-        return "No reminders." + ("" if show_all else " (use all=true for done/other scopes)")
-    out = []
-    for r in sorted(rows, key=lambda x: x["due"]):
-        rel = r["due"] - now
-        when = f"in {_ago(rel)}" if rel > 0 else f"OVERDUE {_ago(rel)}"
-        out.append(
-            f"[{r['id']}] {when} — {r['text']}  "
-            f"({r['status']}, scope={r['scope']}"
-            + (f", repeats {_ago(r['repeat'])}" if r.get("repeat") else "")
-            + f", surfaced {r['deliveries']}x)"
-        )
-    return "\n".join(out)
-
-
-@fir_ext.tool(
-    "reminder_done",
-    "Mark a reminder handled so it stops surfacing.",
-    {
-        "type": "object",
-        "properties": {"id": {"type": "string", "description": "Reminder id."}},
-        "required": ["id"],
-    },
-)
-def reminder_done(args, ctx):
-    rid = str(args["id"]).strip().strip("[]")
-    if rid not in _load(force=True):
-        return f"No such reminder: {rid}"
-    _append({"op": "done", "id": rid})
-    _load(force=True)
-    return f"Reminder [{rid}] closed."
-
-
-@fir_ext.tool(
-    "reminder_snooze",
-    "Defer a reminder to a later time.",
-    {
-        "type": "object",
-        "properties": {
-            "id": {"type": "string", "description": "Reminder id."},
-            "for": {
-                "type": "string",
-                "description": "Delay or clock time: '1h', '30m', '9am'.",
-            },
-        },
-        "required": ["id", "for"],
-    },
-)
-def reminder_snooze(args, ctx):
-    rid = str(args["id"]).strip().strip("[]")
-    if rid not in _load(force=True):
-        return f"No such reminder: {rid}"
-    due = parse_due(str(args["for"]))
-    _append({"op": "snooze", "id": rid, "due": int(due)})
-    _load(force=True)
-    return (
-        f"Reminder [{rid}] snoozed until "
-        f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(due))} (in {_ago(due - time.time())})."
-    )
-
-
-@fir_ext.tool(
     "watcher_add",
-    "Watch a source and surface new items as [interrupt:<kind>] blocks on the "
-    "next turn. kind 'dir': new files/dirs in directory `target` (on this "
-    "host). First probe only records what exists; no backlog. For time, use "
-    "reminder_add.",
+    "Set a reminder or a watcher — use for 'remind me…', 'don't let me "
+    "forget…', 'in 20 minutes…', 'at 2pm…', 'tomorrow 9am…', 'every day…', "
+    "'check back on…', and 'tell me when a file lands in…'. Items surface as "
+    "[interrupt:<kind>] blocks on the next turn after they fire (late delivery "
+    "is reported as overdue, never dropped). "
+    "kind='time' (a reminder): needs `text` + `due`; optional `repeat`. "
+    "kind='dir': new files/dirs in directory `target` on this host; first "
+    "probe only records what exists, no backlog.",
     {
         "type": "object",
         "properties": {
-            "kind": {"type": "string", "description": "Watcher kind: 'dir'."},
+            "kind": {"type": "string",
+                     "description": "'time' (reminder: remind me / in 20 minutes / at 2pm) "
+                     "or 'dir' (tell me when a file lands in a directory)."},
+            "text": {"type": "string", "description": "time: what to remind about."},
+            "due": {"type": "string",
+                    "description": "time: when — '45m', '1h30m', '2pm', '14:00', "
+                    "'tomorrow 9am', ISO datetime, or epoch seconds."},
+            "repeat": {"type": "string",
+                       "description": "time: optional repeat interval ('8h', '1d', '30m'). "
+                       "Re-arms this far out each time it fires and NEVER auto-expires — "
+                       "stops only at watcher_remove. Use for recurring nudges and "
+                       "poll-until-true checks where the text tells the future agent what "
+                       "to test (if the condition does not hold, say nothing and let it "
+                       "re-arm). Prefer this over remove+re-add."},
             "target": {"type": "string", "description": "dir: absolute directory path."},
-            "scope": {"type": "string", "description": "'any' (default) or 'here'."},
-            "interval": {"type": "string", "description": "Probe interval, e.g. '30s', '5m'. Default 60s."},
+            "scope": {"type": "string",
+                      "description": "'any' (DEFAULT: fires in the first live session that "
+                      "wakes, wherever the user shows up) or 'here' (this conversation "
+                      "ONLY). Use 'here' only when the item is meaningless outside this "
+                      "thread AND you expect to still be in it — a 'here' item is "
+                      "silently stranded if the conversation is deleted or not revisited."},
+            "interval": {"type": "string",
+                         "description": "dir: probe interval, e.g. '30s', '5m'. Default 60s."},
         },
-        "required": ["kind", "target"],
+        "required": ["kind"],
     },
 )
 def watcher_add(args, ctx):
-    kind = str(args["kind"]).strip()
-    if kind in ("reminder", "reminders", "time"):
-        return "Use reminder_add for time-based watchers."
+    kind = str(args.get("kind") or "").strip().lower()
+    if kind in _TIME_KINDS:
+        return _add_time(args, ctx)
     if kind not in PROBES:
-        return f"Unknown kind {kind!r}; known: {', '.join(sorted(PROBES))}"
+        return f"Unknown kind {kind!r}; known: time, {', '.join(sorted(PROBES))}"
+    if not args.get("target"):
+        return f"kind={kind!r} needs `target`."
     target = os.path.abspath(os.path.expanduser(str(args["target"])))
     if kind == "dir" and not os.path.isdir(target):
         return f"Not a directory on {SHARD_ID}: {target}"
@@ -924,33 +825,91 @@ def watcher_add(args, ctx):
 
 @fir_ext.tool(
     "watcher_list",
-    "List active watchers (non-time kinds; reminders: reminder_list).",
-    {"type": "object", "properties": {}},
+    "List outstanding reminders and watchers — use for 'what reminders do I "
+    "have', 'what did I ask you to remind me about', 'what are you watching'. "
+    "Shows pending time reminders (due and upcoming) for this conversation "
+    "plus global ones, and active dir watchers.",
+    {
+        "type": "object",
+        "properties": {
+            "all": {"type": "boolean",
+                    "description": "Include done reminders and other conversations' scopes."}
+        },
+    },
 )
 def watcher_list(args, ctx):
-    _load(force=True)
-    ws = sorted(_state["watchers"].values(), key=lambda w: w["id"])
-    if not ws:
-        return "No watchers."
-    return "\n".join(
-        f"[{w['id']}] {w['kind']} {w['target']} host={w.get('host')} "
-        f"every {_ago(float(w.get('interval') or DEFAULT_INTERVAL))} scope={w.get('scope')}"
-        for w in ws)
+    recs = _load(force=True)
+    here = _scope_here(ctx)
+    show_all = bool(args.get("all"))
+    now = time.time()
+    rows = [r for r in recs.values()
+            if show_all or (r["status"] == "pending" and _matches(r, here))]
+    out = []
+    for r in sorted(rows, key=lambda x: x["due"]):
+        rel = r["due"] - now
+        when = f"in {_ago(rel)}" if rel > 0 else f"OVERDUE {_ago(rel)}"
+        out.append(
+            f"[{r['id']}] time {when} — {r['text']}  "
+            f"({r['status']}, scope={r['scope']}"
+            + (f", repeats {_ago(r['repeat'])}" if r.get("repeat") else "")
+            + f", surfaced {r['deliveries']}x)"
+        )
+    for w in sorted(_state["watchers"].values(), key=lambda w: w["id"]):
+        out.append(
+            f"[{w['id']}] {w['kind']} {w['target']} host={w.get('host')} "
+            f"every {_ago(float(w.get('interval') or DEFAULT_INTERVAL))} scope={w.get('scope')}")
+    if not out:
+        return "No reminders or watchers." + ("" if show_all else " (use all=true for done/other scopes)")
+    return "\n".join(out)
 
 
 @fir_ext.tool(
     "watcher_remove",
-    "Stop a watcher.",
-    {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+    "Close a reminder or stop a watcher by id — use when a reminder is "
+    "handled ('done', 'cancel that reminder', 'stop reminding me', 'stop "
+    "watching'). Ends repeating reminders too.",
+    {"type": "object",
+     "properties": {"id": {"type": "string", "description": "Reminder (r…) or watcher (w…) id."}},
+     "required": ["id"]},
 )
 def watcher_remove(args, ctx):
     wid = str(args["id"]).strip().strip("[]")
+    recs = _load(force=True)
+    if wid in recs:
+        _append({"op": "done", "id": wid})
+        _load(force=True)
+        return f"Reminder [{wid}] closed."
+    if wid in _state["watchers"]:
+        _append({"op": "unwatch", "id": wid})
+        _load(force=True)
+        return f"Watcher [{wid}] removed."
+    return f"No such reminder or watcher: {wid}"
+
+
+@fir_ext.tool(
+    "watcher_snooze",
+    "Defer a reminder to a later time — use for 'remind me again later', "
+    "'snooze that', 'not now, in an hour'.",
+    {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Reminder id."},
+            "for": {"type": "string", "description": "Delay or clock time: '1h', '30m', '9am'."},
+        },
+        "required": ["id", "for"],
+    },
+)
+def watcher_snooze(args, ctx):
+    rid = str(args["id"]).strip().strip("[]")
+    if rid not in _load(force=True):
+        return f"No such reminder: {rid}"
+    due = parse_due(str(args["for"]))
+    _append({"op": "snooze", "id": rid, "due": int(due)})
     _load(force=True)
-    if wid not in _state["watchers"]:
-        return f"No such watcher: {wid}"
-    _append({"op": "unwatch", "id": wid})
-    _load(force=True)
-    return f"Watcher [{wid}] removed."
+    return (
+        f"Reminder [{rid}] snoozed until "
+        f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(due))} (in {_ago(due - time.time())})."
+    )
 
 
 fir_ext.run()
