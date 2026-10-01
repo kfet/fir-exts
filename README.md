@@ -49,7 +49,7 @@ Reminders:
 
 Durable reminders. **jsonl is truth, memory is cache.**
 
-- Tools: `reminder_add`, `reminder_list`, `reminder_done`, `reminder_snooze`
+- Tools: `watcher_add` (`kind="time"` reminders, `kind="dir"`), `watcher_list`, `watcher_remove`, `watcher_snooze`
 - Formats: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch
 - Store: a **directory** of per-host shards. Precedence:
   1. `$FIR_REMINDERS_STORE` (if it names an existing file or ends in `.jsonl`,

@@ -109,7 +109,7 @@ gap = rec["due"] - time.time()
 check("repeat: re-armed ~8h out, not 24h", 8 * 3600 - 120 < gap < 8 * 3600 + 120, gap)
 check("repeat: fired every time", len(ctx.msgs) == 12, len(ctx.msgs))
 check("repeat: block flags the repeat interval", "repeat 8h" in ctx.msgs[-1], ctx.msgs[-1])
-check("repeat: block is data only, no tool prose", "reminder_done" not in ctx.msgs[-1])
+check("repeat: block is data only, no tool prose", "watcher_remove" not in ctx.msgs[-1])
 check("repeat: tagged as a generic interrupt", ctx.msgs[-1].startswith("[interrupt:reminders] "))
 
 # --- 3b. the rendering contract reaches the system prompt at session_start ---
@@ -124,7 +124,7 @@ class OldCtx(Ctx):
 rem._on_start({}, OldCtx())  # must not raise
 check("repeat: no auto-snooze wording", "auto-snoozed" not in ctx.msgs[-1])
 
-# --- 4. reminder_done ends a repeating reminder -----------------------
+# --- 4. done ends a repeating reminder -----------------------
 rem._append({"op": "done", "id": "r4"})
 check("done stops repeat", rem._load(force=True)["r4"]["status"] == "done")
 
