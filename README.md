@@ -7,8 +7,8 @@ and (optionally) a `SKILL.md` presentation skill:
 
 ```
 fir-exts/
-  reminders/
-    reminders.py      # extension: tools + lifecycle hooks
+  watchers/
+    watchers.py       # extension: tools + lifecycle hooks
     SKILL.md          # skill: how the agent should present/manage them
 ```
 
@@ -23,7 +23,7 @@ fir install github.com/kfet/fir-exts
 Single extension (sparse checkout):
 
 ```
-fir install github.com/kfet/fir-exts/reminders
+fir install github.com/kfet/fir-exts/watchers
 ```
 
 > **Caveat (fir ≤ current):** subdir installs of *two different* subdirs from the
@@ -40,7 +40,12 @@ to — reload is **session-scoped**, not process-scoped.
 
 ## Extensions
 
-### `reminders`
+### `watchers`
+
+Reminders (time) plus `dir` watchers (new files in a directory; leader-locked
+in-process producer). See `watchers/SKILL.md`.
+
+Reminders:
 
 Durable reminders. **jsonl is truth, memory is cache.**
 

@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 # ---
-# name: reminders
-# description: Durable reminders with lazy catch-up delivery (no daemon).
+# name: watchers
+# description: Watchers (reminders, dir) with lazy catch-up interrupt delivery.
 # modes: tui, text, acp
 # ---
-"""Reminders — jsonl is truth, memory is cache.
+"""Watchers — jsonl is truth, memory is cache.
+
+A watcher kind turns some source into `[interrupt:<kind>]` items. Two kinds:
+  * reminders — time. Records are `add/done/snooze/delivered` ops; the sweep
+    itself is the "producer" (due <= now).
+  * dir — new entries in a directory. A daemon-thread producer (probe +
+    cursor + stable event id) appends `event` ops to the inbox; the sweep
+    tombstones (`ack`) then injects. Producers live only while fir runs.
+New kinds (e.g. rss) = one entry in PROBES. Nothing else changes.
 
 Design (see conversation notes):
   * store: a DIRECTORY of per-host shards (sharded writes, shared reads).
@@ -27,12 +35,15 @@ Design (see conversation notes):
 
 from __future__ import annotations
 
+import fcntl
 import glob as _glob
+import hashlib
 import json
 import os
 import re
 import shutil
 import socket
+import threading
 import time
 import uuid
 from typing import Any
@@ -100,7 +111,8 @@ def _init_store() -> None:
     else:
         STORE_DIR = path
         STORE = os.path.join(STORE_DIR, SHARD_ID + ".jsonl")
-    _state.update({"key": None, "recs": {}, "next_due": float("inf")})
+    _state.update({"key": None, "recs": {}, "next_due": float("inf"),
+                   "watchers": {}, "events": {}})
     if STORE_MODE == "dir":
         try:
             _migrate_legacy()
@@ -149,13 +161,16 @@ def _migrate_legacy() -> None:
         return
 
 
+# max items shown per kind per interrupt; the rest collapse to "+N more"
+CAP = 5
 # re-nag interval once a reminder has been surfaced but not completed
 RENAG_S = 900
 # after this many deliveries, auto-snooze a day so it stops being noise
 MAX_DELIVERIES = 5
 
 # "key" is the (path, mtime, size) fingerprint of every shard seen last sweep.
-_state: dict[str, Any] = {"key": None, "recs": {}, "next_due": float("inf")}
+_state: dict[str, Any] = {"key": None, "recs": {}, "next_due": float("inf"),
+                          "watchers": {}, "events": {}}
 
 _init_store()
 
@@ -250,9 +265,8 @@ def _load(force: bool = False) -> dict:
     """Reduce the op log into current records. Cheap: stat + compare."""
     key = _scan_key()
     if not key:
-        _state["recs"] = {}
-        _state["next_due"] = float("inf")
-        _state["key"] = None
+        _state.update({"recs": {}, "next_due": float("inf"), "key": None,
+                       "watchers": {}, "events": {}})
         return {}
     if not force and key == _state["key"]:
         return _state["recs"]
@@ -265,9 +279,27 @@ def _load(force: bool = False) -> dict:
     # A repeating reminder re-arms via `delivered`+reset while still pending,
     # so it is unaffected; `done` remains the only thing that ends a repeat.
     done_ids: set[str] = set()
+    watchers: dict[str, dict] = {}
+    events: dict[str, dict] = {}
+    gone: set[str] = set()  # unwatched watchers / acked events: absorbing
     for _at, _name, _ln, op in _read_ops():
         rid = op["id"]
         kind = op.get("op")
+        if kind in ("unwatch", "ack"):
+            gone.add(rid)
+            watchers.pop(rid, None)
+            events.pop(rid, None)
+            continue
+        if kind == "watch":
+            if rid not in gone:
+                watchers[rid] = {k: op.get(k) for k in
+                                 ("id", "kind", "target", "scope", "interval", "host")}
+            continue
+        if kind == "event":
+            # dedupe by stable event id: first wins, ack absorbs forever
+            if rid not in gone and rid not in events:
+                events[rid] = {k: op.get(k) for k in ("id", "kind", "scope", "text", "ts")}
+            continue
         if kind == "add":
             recs[rid] = {
                 "id": rid,
@@ -305,8 +337,12 @@ def _load(force: bool = False) -> dict:
                 r["due"] = float(op.get("next_due", r["due"]) or 0)
 
     _state["recs"] = recs
+    _state["watchers"] = watchers
+    _state["events"] = events
     _state["key"] = key
     pend = [r["due"] for r in recs.values() if r["status"] == "pending"]
+    if events:
+        pend.append(0.0)
     _state["next_due"] = min(pend) if pend else float("inf")
     return recs
 
@@ -432,8 +468,23 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
         for r in recs.values()
         if r["status"] == "pending" and r["due"] <= now and _matches(r, here)
     ]
-    if not due or not deliver:
+    evs = [e for e in _state["events"].values() if _matches(e, here)]
+    if not deliver or (not due and not evs):
         return due
+
+    blocks = []
+    if evs:
+        # tombstone BEFORE surfacing, exactly like reminders
+        for e in evs:
+            _append({"op": "ack", "id": e["id"]})
+        by_kind: dict[str, list] = {}
+        for e in sorted(evs, key=lambda x: (x.get("ts") or 0, x["id"])):
+            by_kind.setdefault(str(e.get("kind") or "event"), []).append(e)
+        for k, items in by_kind.items():
+            shown = [f"- [{e['id']}] {e.get('text', '')}" for e in items[:CAP]]
+            if len(items) > CAP:
+                shown.append(f"+{len(items) - CAP} more")
+            blocks.append(f"[interrupt:{k}] {len(items)} new\n" + "\n".join(shown))
 
     lines = []
     for r in sorted(due, key=lambda x: x["due"]):
@@ -472,12 +523,14 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
     # DATA ONLY. Rendering is owned by the interrupt contract prepended at
     # session_start (_CONTRACT); semantics are owned by SKILL.md. Adding
     # prose here is what made reminders compete with the turn's real answer.
-    body = f"[interrupt:reminders] {len(lines)} due\n" + "\n".join(lines)
+    if lines:
+        blocks.insert(0, f"[interrupt:reminders] {len(lines)} due\n" + "\n".join(lines))
+    body = "\n\n".join(blocks)
     try:
         ctx.send_user_message(body, deliver_as="steer")
     except Exception:
         try:
-            ctx.send_message("reminder_due", body, display=True)
+            ctx.send_message("watcher_due", body, display=True)
         except Exception:
             pass
     return due
@@ -511,6 +564,7 @@ and the items, each with its status in italics.\
 @fir_ext.on("session_start")
 def _on_start(params, ctx):
     _load(force=True)
+    _start_producers()
     try:
         ctx.prepend(_CONTRACT)
     except Exception:
@@ -531,13 +585,139 @@ def _hook_sweep(params, ctx):
         return
     _last_sweep["t"] = now
     try:
-        _sweep(ctx, deliver=True)
+        with _mu:
+            _sweep(ctx, deliver=True)
     except Exception:
         pass
 
 
 fir_ext.on("turn_start")(_hook_sweep)
 fir_ext.on("agent_start")(_hook_sweep)
+
+
+# ---------------------------------------------------------------- producers
+#
+# A producer = probe + cursor + stable event id. Producers run as daemon
+# threads INSIDE this process, so they run only while fir runs (accepted).
+# Many fir processes share a host; per watcher, only the holder of an flock
+# leader lock probes. The lock is held for the process lifetime, so when the
+# leader exits the next process to tick takes over. Cursors and locks are
+# host-local (never in the synced store): a listing is a fact about one host.
+
+TICK_S = 5
+DEFAULT_INTERVAL = 60
+_mu = threading.RLock()  # producer thread vs. hook sweep share _state
+_leases: dict[str, Any] = {}  # wid -> open lock fd we hold
+_last_probe: dict[str, float] = {}
+
+
+def _local_dir() -> str:
+    d = os.environ.get("FIR_WATCHERS_LOCAL") or os.path.join(_xdg_state(), "fir-watchers")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _lead(wid: str) -> bool:
+    """True if this process is (or just became) the leader for wid."""
+    if wid in _leases:
+        return True
+    fh = open(os.path.join(_local_dir(), wid + ".lock"), "a")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    _leases[wid] = fh
+    return True
+
+
+def _cursor_path(wid: str) -> str:
+    return os.path.join(_local_dir(), wid + ".cursor.json")
+
+
+def _event_id(wid: str, key: str) -> str:
+    return f"{wid}-" + hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:10]
+
+
+def _data(name: str, limit: int = 200) -> str:
+    """Untrusted text as inert data: repr() kills newlines/controls/brackets."""
+    r = repr(name)
+    return r if len(r) <= limit else r[:limit] + "…"
+
+
+def _probe_dir(w: dict) -> list[tuple[str, str]]:
+    """New entries in w['target'] since the cursor. First run: cursor only."""
+    target = os.path.expanduser(str(w.get("target") or ""))
+    names = set(os.listdir(target))
+    cp = _cursor_path(w["id"])
+    try:
+        with open(cp) as fh:
+            seen = set(json.load(fh))
+    except (OSError, ValueError):
+        seen = None  # first run: adopt "now" as the cursor, no backlog flood
+    new = [] if seen is None else sorted(names - seen)
+    out = [(n, f"new in {target}: {_data(n)}") for n in new]
+    tmp = cp + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(sorted(names), fh)
+    os.replace(tmp, cp)
+    return out
+
+
+# kind -> probe(watcher) -> [(stable key, text)]. Seam for new kinds (rss:
+# key = entry guid, cursor = seen guids, text = _data(title)).
+PROBES = {"dir": _probe_dir}
+
+
+def _produce_once(now: float | None = None) -> int:
+    """One producer tick over every watcher bound to this host."""
+    with _mu:
+        return _produce_locked(now if now is not None else time.time())
+
+
+def _produce_locked(now: float) -> int:
+    _load()
+    n = 0
+    for w in list(_state["watchers"].values()):
+        probe = PROBES.get(str(w.get("kind")))
+        if not probe or w.get("host") != SHARD_ID:
+            continue
+        iv = float(w.get("interval") or DEFAULT_INTERVAL)
+        if now - _last_probe.get(w["id"], 0) < iv or not _lead(w["id"]):
+            continue
+        _last_probe[w["id"]] = now
+        try:
+            found = probe(w)
+        except Exception:
+            continue
+        known = _state["events"]
+        for key, text in found:
+            eid = _event_id(w["id"], key)
+            if eid in known:
+                continue
+            _append({"op": "event", "id": eid, "kind": w["kind"],
+                     "scope": w.get("scope") or "any", "text": text, "ts": int(now)})
+            n += 1
+    return n
+
+
+_producer = {"started": False}
+
+
+def _start_producers() -> None:
+    if _producer["started"]:
+        return
+    _producer["started"] = True
+
+    def loop():
+        while True:
+            try:
+                _produce_once()
+            except Exception:
+                pass
+            time.sleep(TICK_S)
+
+    threading.Thread(target=loop, name="watchers-producer", daemon=True).start()
 
 
 # ---------------------------------------------------------------- tools
@@ -699,6 +879,78 @@ def reminder_snooze(args, ctx):
         f"Reminder [{rid}] snoozed until "
         f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(due))} (in {_ago(due - time.time())})."
     )
+
+
+@fir_ext.tool(
+    "watcher_add",
+    "Watch a source and surface new items as [interrupt:<kind>] blocks on the "
+    "next turn. kind 'dir': new files/dirs in directory `target` (on this "
+    "host). First probe only records what exists; no backlog. For time, use "
+    "reminder_add.",
+    {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "description": "Watcher kind: 'dir'."},
+            "target": {"type": "string", "description": "dir: absolute directory path."},
+            "scope": {"type": "string", "description": "'any' (default) or 'here'."},
+            "interval": {"type": "string", "description": "Probe interval, e.g. '30s', '5m'. Default 60s."},
+        },
+        "required": ["kind", "target"],
+    },
+)
+def watcher_add(args, ctx):
+    kind = str(args["kind"]).strip()
+    if kind in ("reminder", "reminders", "time"):
+        return "Use reminder_add for time-based watchers."
+    if kind not in PROBES:
+        return f"Unknown kind {kind!r}; known: {', '.join(sorted(PROBES))}"
+    target = os.path.abspath(os.path.expanduser(str(args["target"])))
+    if kind == "dir" and not os.path.isdir(target):
+        return f"Not a directory on {SHARD_ID}: {target}"
+    iv = DEFAULT_INTERVAL
+    if args.get("interval"):
+        m = _REL.match(str(args["interval"]))
+        if not m:
+            raise ValueError(f"bad interval: {args['interval']!r}")
+        iv = max(5, sum(int(n) * _MULT[u.lower()] for n, u in _PART.findall(m.group(1))))
+    scope = _scope_here(ctx) if str(args.get("scope") or "any") in ("here", "conv") else "any"
+    wid = "w" + uuid.uuid4().hex[:6]
+    _append({"op": "watch", "id": wid, "kind": kind, "target": target,
+             "scope": scope, "interval": iv, "host": SHARD_ID})
+    _load(force=True)
+    _start_producers()
+    return f"Watcher [{wid}] {kind} {target} on {SHARD_ID}, every {_ago(iv)}, scope={scope}"
+
+
+@fir_ext.tool(
+    "watcher_list",
+    "List active watchers (non-time kinds; reminders: reminder_list).",
+    {"type": "object", "properties": {}},
+)
+def watcher_list(args, ctx):
+    _load(force=True)
+    ws = sorted(_state["watchers"].values(), key=lambda w: w["id"])
+    if not ws:
+        return "No watchers."
+    return "\n".join(
+        f"[{w['id']}] {w['kind']} {w['target']} host={w.get('host')} "
+        f"every {_ago(float(w.get('interval') or DEFAULT_INTERVAL))} scope={w.get('scope')}"
+        for w in ws)
+
+
+@fir_ext.tool(
+    "watcher_remove",
+    "Stop a watcher.",
+    {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+)
+def watcher_remove(args, ctx):
+    wid = str(args["id"]).strip().strip("[]")
+    _load(force=True)
+    if wid not in _state["watchers"]:
+        return f"No such watcher: {wid}"
+    _append({"op": "unwatch", "id": wid})
+    _load(force=True)
+    return f"Watcher [{wid}] removed."
 
 
 fir_ext.run()
