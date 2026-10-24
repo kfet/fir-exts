@@ -148,6 +148,25 @@ exactly when it matters; and it hardcoded one vendor's JSON shape, making every
 other budget (Poe points, gateway budgets, plain API keys) invisible. Delegating
 to the agent means new providers need no edit to this file.
 
+### `repo-skills`
+
+When a tool call touches a path inside a git repo that this session has not
+seen yet, the extension injects one short note (as a steer) with the repo's
+`AGENTS.md` / `CLAUDE.md` path and an index of its skills (`.fir/skills`,
+`skills/`, `.claude/skills`). The agent then finds repo skills it would
+otherwise miss when it works outside its start directory.
+
+- **Trigger:** `hook/tool_call` params `path`, `cwd`, `file_path`, and
+  absolute paths or `cd X` in a bash `command`. It never blocks a tool.
+- **Resolve:** walk up to the nearest `.git` (dir or worktree file), after
+  symlinks are resolved. Results are cached per directory.
+- **Once per repo per session.** The start cwd counts as seen.
+- **Paths only.** File contents are never inlined. Repos outside `$HOME` are
+  marked untrusted.
+- **Small:** skills whose names fir already loaded are skipped; at most 15
+  are listed.
+- Log: `~/.cache/fir/repo-skills.log`.
+
 ### `extreload`
 
 One tool, `ext_reload(name)` — hot-reloads a named extension in the live session
