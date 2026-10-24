@@ -163,8 +163,8 @@ otherwise miss when it works outside its start directory.
 - **Once per repo per session.** The start cwd counts as seen.
 - **Paths only.** File contents are never inlined. Repos outside `$HOME` are
   marked untrusted.
-- **Small:** skills whose names fir already loaded are skipped; at most 15
-  are listed.
+- **Small:** at most 15 skills are listed. Skills whose names fir already
+  loaded are named on one line only (the repo copy may differ).
 - Log: `~/.cache/fir/repo-skills.log`.
 
 ### `extreload`
