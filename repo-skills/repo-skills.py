@@ -114,7 +114,7 @@ def describe(root):
         if os.path.isfile(os.path.join(root, a)):
             lines.append(f"- Read first: {os.path.join(root, a)}")
     skills = []
-    skipped = 0
+    skipped = []
     for d in SKILL_DIRS:
         base = os.path.join(root, d)
         if not os.path.isdir(base):
@@ -125,7 +125,7 @@ def describe(root):
                 n, ds = frontmatter(sk)
                 n = n or ent
                 if n in LOADED:
-                    skipped += 1
+                    skipped.append(n)
                     continue
                 skills.append(f"- {n}: {ds[:120]} ({sk})")
     if skills:
@@ -135,7 +135,8 @@ def describe(root):
         if extra > 0:
             lines.append(f"- +{extra} more in the skill dirs above")
     if skipped:
-        lines.append(f"({skipped} skills with names already loaded were not listed)")
+        lines.append("Same name as a loaded skill (repo copy may differ): "
+                     + ", ".join(f"{n}" for n in skipped[:20]))
     if len(lines) == 1:
         return None
     return "\n".join(lines)
