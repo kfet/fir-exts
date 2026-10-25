@@ -111,6 +111,15 @@ wasteful plan and the user finds out when a request is refused.
 - **It checks nothing itself.** At `turn_end` it decides a check is due and
   prepends a `[SYS_EXT]` note asking the agent to look up its own budget and
   report back. Cadence and memory here; the lookup belongs to the agent.
+- **Free readings first (fir >= 1.41).** On an Anthropic subscription, fir's
+  builtin provider-usage extension caches the account-wide quota headers
+  carried by every response (`anthropic-usage-cache.json`,
+  `anthropic-usage-series.json`). When a check is due and that reading is
+  fresher than `freshMinutes`, it is recorded automatically (`source:
+  "headers"`) with no agent turn. The agent is prompted only when the reading
+  is missing/stale (full check, as before) or shows a concern: a window at or
+  above `warnPct`, a non-`allowed` status, or a burst — 5h utilization up
+  `burstPoints` within `burstMinutes` (many sessions waking at once).
 - Store: `quota-watch-log.json` in the **global** config dir (a budget is
   account-wide, not per-project). Written atomically via `os.replace`, since
   several sessions share the file and a torn write reads back as invalid JSON
@@ -136,7 +145,11 @@ all keys optional:
   "minMinutes": 20,
   "everyDollars": 2.00,
   "everyMinutes": 90,
-  "keepNotes": 20
+  "keepNotes": 20,
+  "freshMinutes": 15,
+  "warnPct": 80,
+  "burstPoints": 3,
+  "burstMinutes": 10
 }
 ```
 

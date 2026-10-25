@@ -27,6 +27,16 @@ actual check to the agent — which knows what provider it is on, has
 skills for reading those budgets, and adapts when a new one appears
 without anyone editing this file.
 
+Header readings (fir >= 1.41): fir's builtin provider-usage extension
+keeps a shared cache fed by the account-wide quota headers on every
+Anthropic subscription response (``anthropic-usage-cache.json`` and
+``anthropic-usage-series.json`` in the global config dir). When a check
+is due and that reading is fresh, it is recorded here automatically —
+no agent turn, no cost — and the agent is nudged only when the reading
+is missing or stale, a window is near its limit, the provider reports a
+non-``allowed`` status, or utilization is bursting. Other providers fall
+back to the agent check.
+
 How it works: at ``turn_end`` it decides whether a check is due (based on
 elapsed time and accrued session cost — an idle session burns nothing and
 is never nudged). When one is, it prepends a ``[SYS_EXT]`` note asking the
@@ -45,7 +55,11 @@ Config — ``quota-watch.json`` in any host config dir (project-local
       "minMinutes": 20,       // never nudge more often than this
       "everyDollars": 2.00,   // nudge once this much session cost accrues
       "everyMinutes": 90,     // ...or this long, whichever comes first
-      "keepNotes": 20         // how many past readings to retain
+      "keepNotes": 20,        // how many past readings to retain
+      "freshMinutes": 15,     // header reading older than this counts as stale
+      "warnPct": 80,          // nudge when any window is at/above this
+      "burstPoints": 3,       // nudge when 5h utilization rises this many
+      "burstMinutes": 10      //   points within this many minutes
     }
 """
 
@@ -70,7 +84,15 @@ DEFAULTS = {
     "everyDollars": 2.00,
     "everyMinutes": 90,
     "keepNotes": 20,
+    "freshMinutes": 15,
+    "warnPct": 80,
+    "burstPoints": 3,
+    "burstMinutes": 10,
 }
+
+USAGE_CACHE = "anthropic-usage-cache.json"
+USAGE_SERIES = "anthropic-usage-series.json"
+WINDOW_KEYS = {"five_hour": "5h_pct", "seven_day": "7d_pct"}
 
 # Session state. A fresh process means a fresh session, so re-checking early
 # is correct — the account-wide window may already be nearly spent by others.
@@ -100,10 +122,22 @@ def _num(cfg: dict, key: str) -> float:
         return float(DEFAULTS[key])
 
 
-def _log_path() -> Path:
+def _global_dir() -> Path:
     """Global config dir — a budget is account-wide, not per-project."""
     base = Path(fir_ext.config_dirs[-1]) if fir_ext.config_dirs else Path.home() / ".config" / "fir"
-    return base.expanduser() / LOG_FILENAME
+    return base.expanduser()
+
+
+def _log_path() -> Path:
+    return _global_dir() / LOG_FILENAME
+
+
+def _read_json(path: Path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def _read_notes() -> list[dict]:
@@ -193,6 +227,98 @@ def _deltas(notes: list[dict]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Header-fed readings (provider-usage shared cache)
+# ---------------------------------------------------------------------------
+
+
+def _header_reading(cfg: dict, now: float) -> dict | None:
+    """The fresh account-wide reading provider-usage took from response
+    headers, as ``{"numbers", "resets", "status", "at"}``; None when there is
+    none or it is older than ``freshMinutes``."""
+    cache = _read_json(_global_dir() / USAGE_CACHE)
+    if not isinstance(cache, dict):
+        return None
+    at = cache.get("headers_at")
+    if not isinstance(at, (int, float)) or now - at > _num(cfg, "freshMinutes") * 60:
+        return None
+    data = cache.get("data") if isinstance(cache.get("data"), dict) else {}
+    numbers, resets = {}, {}
+    for window, key in WINDOW_KEYS.items():
+        win = data.get(window)
+        if isinstance(win, dict) and isinstance(win.get("utilization"), (int, float)):
+            numbers[key] = round(float(win["utilization"]), 1)
+            if isinstance(win.get("resets_at"), str):
+                resets[key] = win["resets_at"]
+    if not numbers:
+        return None
+    headers = cache.get("headers") if isinstance(cache.get("headers"), dict) else {}
+    return {"numbers": numbers, "resets": resets, "status": str(headers.get("status") or ""), "at": float(at)}
+
+
+def _burst(cfg: dict, now: float) -> float | None:
+    """5h utilization rise (points) within ``burstMinutes`` inside one window,
+    if it reaches ``burstPoints``; else None."""
+    series = _read_json(_global_dir() / USAGE_SERIES)
+    entries = series.get("entries") if isinstance(series, dict) else None
+    window = _num(cfg, "burstMinutes") * 60
+    recent = [
+        e
+        for e in entries or []
+        if isinstance(e, dict)
+        and isinstance(e.get("five_hour"), (int, float))
+        and e.get("five_hour_reset")
+        and now - float(e.get("t") or 0) <= window
+    ]
+    if len(recent) < 2:
+        return None
+    latest = max(recent, key=lambda e: e["t"])
+    same = [e for e in recent if e["five_hour_reset"] == latest["five_hour_reset"]]
+    rise = float(latest["five_hour"]) - min(float(e["five_hour"]) for e in same)
+    return rise if rise >= _num(cfg, "burstPoints") else None
+
+
+def _concerns(cfg: dict, reading: dict, burst: float | None) -> list[str]:
+    out = []
+    for key, val in reading["numbers"].items():
+        if val >= _num(cfg, "warnPct"):
+            out.append(f"{key} at {val:g}% (resets {reading['resets'].get(key, '?')})")
+    if reading["status"] and reading["status"] != "allowed":
+        out.append(f"provider status '{reading['status']}'")
+    if burst is not None:
+        out.append(
+            f"5h utilization rose {burst:g} points within {_num(cfg, 'burstMinutes'):g} min "
+            "(likely many sessions resuming at once)"
+        )
+    return out
+
+
+def _summary(reading: dict) -> str:
+    parts = [f"{k.replace('_pct', '')} {v:g}%" for k, v in reading["numbers"].items()]
+    return "anthropic-sub (response headers): " + ", ".join(parts)
+
+
+def _record(note: dict, cfg: dict) -> None:
+    notes = _read_notes()
+    notes.append(note)
+    _write_notes(notes[-int(_num(cfg, "keepNotes")) :])
+
+
+def _auto_record(cfg: dict, reading: dict, concerns: list[str], now: float) -> None:
+    _record(
+        {
+            "at": now,
+            "iso": datetime.now().astimezone().isoformat(),
+            "summary": _summary(reading),
+            "provider": "anthropic-sub",
+            "headroom": "tight" if concerns else "ok",
+            "numbers": reading["numbers"],
+            "source": "headers",
+        },
+        cfg,
+    )
+
+
+# ---------------------------------------------------------------------------
 # The nudge
 # ---------------------------------------------------------------------------
 
@@ -221,11 +347,15 @@ with real options (cheaper model, less context, batching, or stopping until \
 the window resets). If it is all healthy, say nothing beyond the record.
 {history}"""
 
+CONCERN = """QUOTA ALERT — the account-wide reading fir took from Anthropic's response headers {age} ago (already recorded, no need to check again) shows:
+{concerns}
+{numbers}
 
-def _nudge_text(info: dict, cost: float, now: float) -> str:
-    model = (info.get("model") or {}) if isinstance(info, dict) else {}
-    notes = _read_notes()
+TELL THE USER in your next reply — plainly, with the numbers, and with real options (cheaper model, less context, batching, pausing idle sessions, or stopping until the window resets). Record what you told them with `quota_note` (told_user=true).
+{history}"""
 
+
+def _history(notes: list[dict], now: float) -> str:
     if notes:
         recent = "\n".join(f"  - {_describe(n, now)}" for n in notes[-3:])
         history = f"\nPreviously recorded, for comparison:\n{recent}"
@@ -234,6 +364,12 @@ def _nudge_text(info: dict, cost: float, now: float) -> str:
             history += f"\nMovement since the previous reading:\n{listed}"
     else:
         history = "\nNo previous reading on record — this is the first check."
+    return history
+
+
+def _nudge_text(info: dict, cost: float, now: float) -> str:
+    model = (info.get("model") or {}) if isinstance(info, dict) else {}
+    history = _history(_read_notes(), now)
 
     since = ""
     if _last_nudge_at:
@@ -283,7 +419,22 @@ def _maybe_nudge(ctx: fir_ext.Context) -> None:
     if not _due(cfg, turns, cost, now):
         return
 
-    ctx.prepend(_nudge_text(info, cost, now))
+    provider = str(((info.get("model") or {}) if isinstance(info, dict) else {}).get("provider") or "")
+    reading = _header_reading(cfg, now) if provider == "anthropic" else None
+    if reading is None:
+        ctx.prepend(_nudge_text(info, cost, now))
+    else:
+        concerns = _concerns(cfg, reading, _burst(cfg, now))
+        _auto_record(cfg, reading, concerns, now)
+        if concerns:
+            ctx.prepend(
+                CONCERN.format(
+                    age=_fmt_span(now - reading["at"]),
+                    concerns="\n".join(f"  - {c}" for c in concerns),
+                    numbers="Numbers: " + _summary(reading),
+                    history=_history(_read_notes(), now),
+                )
+            )
     _last_nudge_at = now
     _last_nudge_cost = cost
     _nudged_once = True
@@ -360,8 +511,8 @@ def quota_note(params, ctx):
         if clean:
             note["numbers"] = clean
 
+    _record(note, _config())
     notes.append(note)
-    _write_notes(notes[-int(_num(_config(), "keepNotes")) :])
 
     lines = ["Recorded."]
     if previous:
