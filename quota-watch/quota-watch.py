@@ -124,7 +124,11 @@ def _num(cfg: dict, key: str) -> float:
 
 def _global_dir() -> Path:
     """Global config dir — a budget is account-wide, not per-project."""
-    base = Path(fir_ext.config_dirs[-1]) if fir_ext.config_dirs else Path.home() / ".config" / "fir"
+    base = (
+        Path(fir_ext.config_dirs[-1])
+        if fir_ext.config_dirs
+        else Path.home() / ".config" / "fir"
+    )
     return base.expanduser()
 
 
@@ -144,7 +148,9 @@ def _read_notes() -> list[dict]:
     try:
         with open(_log_path()) as f:
             data = json.load(f)
-        return [n for n in data if isinstance(n, dict)] if isinstance(data, list) else []
+        return (
+            [n for n in data if isinstance(n, dict)] if isinstance(data, list) else []
+        )
     except Exception:
         return []
 
@@ -222,7 +228,9 @@ def _deltas(notes: list[dict]) -> list[str]:
             continue
         rate = (val - old) / hours
         arrow = "+" if rate > 0 else ""
-        out.append(f"{key}: {old:g} → {val:g} ({arrow}{rate:.1f}/h over {_fmt_span(hours * 3600)})")
+        out.append(
+            f"{key}: {old:g} → {val:g} ({arrow}{rate:.1f}/h over {_fmt_span(hours * 3600)})"
+        )
     return out
 
 
@@ -252,7 +260,12 @@ def _header_reading(cfg: dict, now: float) -> dict | None:
     if not numbers:
         return None
     headers = cache.get("headers") if isinstance(cache.get("headers"), dict) else {}
-    return {"numbers": numbers, "resets": resets, "status": str(headers.get("status") or ""), "at": float(at)}
+    return {
+        "numbers": numbers,
+        "resets": resets,
+        "status": str(headers.get("status") or ""),
+        "at": float(at),
+    }
 
 
 def _burst(cfg: dict, now: float) -> float | None:
@@ -419,7 +432,10 @@ def _maybe_nudge(ctx: fir_ext.Context) -> None:
     if not _due(cfg, turns, cost, now):
         return
 
-    provider = str(((info.get("model") or {}) if isinstance(info, dict) else {}).get("provider") or "")
+    provider = str(
+        ((info.get("model") or {}) if isinstance(info, dict) else {}).get("provider")
+        or ""
+    )
     reading = _header_reading(cfg, now) if provider == "anthropic" else None
     if reading is None:
         ctx.prepend(_nudge_text(info, cost, now))
@@ -499,7 +515,11 @@ def quota_note(params, ctx):
     notes = _read_notes()
     previous = notes[-1] if notes else None
 
-    note = {"at": now, "iso": datetime.now().astimezone().isoformat(), "summary": summary.strip()}
+    note = {
+        "at": now,
+        "iso": datetime.now().astimezone().isoformat(),
+        "summary": summary.strip(),
+    }
     for key in ("provider", "headroom"):
         if isinstance((params or {}).get(key), str):
             note[key] = params[key]
@@ -520,7 +540,9 @@ def quota_note(params, ctx):
     if deltas := _deltas(notes):
         lines.append("Movement: " + "; ".join(deltas))
     else:
-        lines.append("No comparable numbers yet — record `numbers` again next time for a trend.")
+        lines.append(
+            "No comparable numbers yet — record `numbers` again next time for a trend."
+        )
     return {"content": [{"type": "text", "text": "\n".join(lines)}], "is_error": False}
 
 
