@@ -27,7 +27,7 @@ actual check to the agent — which knows what provider it is on, has
 skills for reading those budgets, and adapts when a new one appears
 without anyone editing this file.
 
-Header readings (fir >= 1.41): fir's builtin provider-usage extension
+Header readings (fir >= 1.41; per account slot since 1.45.2): fir's builtin provider-usage extension
 keeps a shared cache fed by the account-wide quota headers on every
 Anthropic subscription response (``anthropic-usage-cache.json`` and
 ``anthropic-usage-series.json`` in the global config dir). When a check
@@ -68,6 +68,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import tempfile
 import time
 from datetime import datetime
@@ -90,8 +91,7 @@ DEFAULTS = {
     "burstMinutes": 10,
 }
 
-USAGE_CACHE = "anthropic-usage-cache.json"
-USAGE_SERIES = "anthropic-usage-series.json"
+DEFAULT_SLOT = "anthropic"
 WINDOW_KEYS = {"five_hour": "5h_pct", "seven_day": "7d_pct"}
 
 # Session state. A fresh process means a fresh session, so re-checking early
@@ -239,11 +239,23 @@ def _deltas(notes: list[dict]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _header_reading(cfg: dict, now: float) -> dict | None:
+def _is_anthropic_slot(provider: str) -> bool:
+    """Default account ("anthropic") or an extra one ("anthropic#<id>")."""
+    return provider == DEFAULT_SLOT or provider.startswith(DEFAULT_SLOT + "#")
+
+
+def _cache_stem(slot: str) -> str:
+    """Per-account file stem, matching fir's provider-usage (>= 1.45.2)."""
+    if slot == DEFAULT_SLOT:
+        return "anthropic-usage"
+    return "anthropic-usage-" + re.sub(r"[^A-Za-z0-9_.-]", "_", slot.split("#", 1)[1])
+
+
+def _header_reading(cfg: dict, now: float, slot: str = DEFAULT_SLOT) -> dict | None:
     """The fresh account-wide reading provider-usage took from response
     headers, as ``{"numbers", "resets", "status", "at"}``; None when there is
     none or it is older than ``freshMinutes``."""
-    cache = _read_json(_global_dir() / USAGE_CACHE)
+    cache = _read_json(_global_dir() / f"{_cache_stem(slot)}-cache.json")
     if not isinstance(cache, dict):
         return None
     at = cache.get("headers_at")
@@ -268,10 +280,10 @@ def _header_reading(cfg: dict, now: float) -> dict | None:
     }
 
 
-def _burst(cfg: dict, now: float) -> float | None:
+def _burst(cfg: dict, now: float, slot: str = DEFAULT_SLOT) -> float | None:
     """5h utilization rise (points) within ``burstMinutes`` inside one window,
     if it reaches ``burstPoints``; else None."""
-    series = _read_json(_global_dir() / USAGE_SERIES)
+    series = _read_json(_global_dir() / f"{_cache_stem(slot)}-series.json")
     entries = series.get("entries") if isinstance(series, dict) else None
     window = _num(cfg, "burstMinutes") * 60
     recent = [
@@ -305,9 +317,18 @@ def _concerns(cfg: dict, reading: dict, burst: float | None) -> list[str]:
     return out
 
 
-def _summary(reading: dict) -> str:
+def _summary(reading: dict, slot: str = DEFAULT_SLOT) -> str:
     parts = [f"{k.replace('_pct', '')} {v:g}%" for k, v in reading["numbers"].items()]
-    return "anthropic-sub (response headers): " + ", ".join(parts)
+    return f"{_label(slot)} (response headers): " + ", ".join(parts)
+
+
+def _label(slot: str) -> str:
+    """Budget name for notes: one per account, so trends never mix accounts."""
+    return (
+        "anthropic-sub"
+        if slot == DEFAULT_SLOT
+        else "anthropic-sub#" + slot.split("#", 1)[1]
+    )
 
 
 def _record(note: dict, cfg: dict) -> None:
@@ -316,13 +337,15 @@ def _record(note: dict, cfg: dict) -> None:
     _write_notes(notes[-int(_num(cfg, "keepNotes")) :])
 
 
-def _auto_record(cfg: dict, reading: dict, concerns: list[str], now: float) -> None:
+def _auto_record(
+    cfg: dict, reading: dict, concerns: list[str], now: float, slot: str = DEFAULT_SLOT
+) -> None:
     _record(
         {
             "at": now,
             "iso": datetime.now().astimezone().isoformat(),
-            "summary": _summary(reading),
-            "provider": "anthropic-sub",
+            "summary": _summary(reading, slot),
+            "provider": _label(slot),
             "headroom": "tight" if concerns else "ok",
             "numbers": reading["numbers"],
             "source": "headers",
@@ -436,19 +459,23 @@ def _maybe_nudge(ctx: fir_ext.Context) -> None:
         ((info.get("model") or {}) if isinstance(info, dict) else {}).get("provider")
         or ""
     )
-    reading = _header_reading(cfg, now) if provider == "anthropic" else None
+    slot = provider
+    reading = _header_reading(cfg, now, slot) if _is_anthropic_slot(slot) else None
     if reading is None:
         ctx.prepend(_nudge_text(info, cost, now))
     else:
-        concerns = _concerns(cfg, reading, _burst(cfg, now))
-        _auto_record(cfg, reading, concerns, now)
+        concerns = _concerns(cfg, reading, _burst(cfg, now, slot))
+        _auto_record(cfg, reading, concerns, now, slot)
         if concerns:
             ctx.prepend(
                 CONCERN.format(
                     age=_fmt_span(now - reading["at"]),
                     concerns="\n".join(f"  - {c}" for c in concerns),
-                    numbers="Numbers: " + _summary(reading),
-                    history=_history(_read_notes(), now),
+                    numbers="Numbers: " + _summary(reading, slot),
+                    history=_history(
+                        [n for n in _read_notes() if n.get("provider") == _label(slot)],
+                        now,
+                    ),
                 )
             )
     _last_nudge_at = now
