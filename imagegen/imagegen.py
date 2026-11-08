@@ -57,7 +57,7 @@ import fir_ext
 CONFIG_PATH = Path.home() / ".config" / "fir" / "imagegen.json"
 AUTH_PATH = Path(os.environ.get("FIR_AUTH_FILE", Path.home() / ".config" / "fir" / "auth.json"))
 CACHE_DIR = Path.home() / ".cache" / "fir"
-OUT_DIR = Path.home() / "imagegen-out"
+OUT_DIR = Path(os.environ.get("FIR_IMAGEGEN_DIR", Path.home() / "ops" / "imagegen"))
 CATALOG_TTL = 24 * 3600
 POE_BALANCE_URL = "https://api.poe.com/usage/current_balance"
 DEFAULT_WARN_AFTER = 10

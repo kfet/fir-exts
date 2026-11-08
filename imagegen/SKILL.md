@@ -7,7 +7,7 @@ description: Generate or edit images from a chat conversation. Use when the user
 
 Your driving model is text-only. Image generation is a **tool call**, not
 something the model does itself. `generate_image(prompt)` writes a PNG to
-`~/imagegen-out/` and returns the path; you then deliver it to the user.
+`~/ops/imagegen/` (override: `FIR_IMAGEGEN_DIR`) and returns the path; you then deliver it to the user.
 
 ## Delivering the result
 
@@ -16,7 +16,7 @@ relay's directive, on its own line, with `inline` so it renders in the chat
 rather than as a download chip:
 
 ```
-<!--poe-attach path="/home/kfet/imagegen-out/img-20260905-013155.png" name="Fir sapling" inline-->
+<!--poe-attach path="/home/kfet/ops/imagegen/img-20260905-013155.png" name="Fir sapling" inline-->
 ```
 
 Never paste base64 or raw bytes into the reply.
