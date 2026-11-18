@@ -58,7 +58,7 @@ live session socket — not built, deliberately.
 
 | Tool | Use |
 |---|---|
-| `watcher_add(kind="time", text, due, scope, repeat)` | A reminder. `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `any` (**default**, first live session that wakes) or `here` (this conversation only — see the dead-letter warning below). `repeat`: optional interval (`8h`, `1d`) — see [Recurring and conditional reminders](#recurring-and-conditional-reminders). |
+| `watcher_add(kind="time", text, due, scope, repeat)` | A reminder. `due`: `45m`, `1h30m`, `2pm`, `14:00`, `tomorrow 9am`, ISO, epoch. `scope`: `any` (**default**, first live session that wakes) or `here` (this conversation only — see the dead-letter warning below). `repeat`: optional interval (`8h`, `1d`), with optional budget `until` (default 24h, max 7d) and `max_fires` (default 20) — see [Recurring and conditional reminders](#recurring-and-conditional-reminders). |
 | `watcher_add(kind="dir", target, scope, interval)` | A dir watcher — see [Dir watchers](#dir-watchers). |
 | `watcher_list(all)` | Pending reminders for this conversation + active watchers; `all=true` for done + other scopes. |
 | `watcher_remove(id)` | Close a reminder (`r…`) or stop a watcher (`w…`). Stops surfacing; ends repeats. |
@@ -113,14 +113,17 @@ automatic 24h snooze is exempt, so the escape hatch stays terminal.
 
 A reminder with `repeat` set is outside this contract entirely: it re-arms one
 interval out every time it fires, resets its counter, and never auto-snoozes.
-It ends only at `watcher_remove`.
+It ends at `watcher_remove` or when its budget is spent (`until` passed or
+`max_fires` fires; the last fire says "last repeat — budget spent"). Repeats set
+before budgets existed get the default budget the next time a session starts.
 
 ## Recurring and conditional reminders
 
 `repeat` turns a reminder into a self-re-arming loop. Two uses:
 
 **Recurring nudge** — `repeat: "1d"` for something that should keep asking
-until it is actually done.
+until it is actually done. Set `until`/`max_fires` to cover the real need
+(e.g. `until: "7d"`); the default budget is 24h / 20 fires.
 
 **Poll until a condition holds** — the pattern to reach for when the trigger is
 an *event you cannot subscribe to* (the user gets home, a release lands, a host

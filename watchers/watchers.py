@@ -56,6 +56,12 @@ import fir_ext
 # dir when seeding a new shard. Not a path to anyone's infrastructure.
 LEGACY_BASENAME = "reminders.jsonl"
 
+# Budget of a repeating reminder: it ends when either is spent, so a
+# poll-until-true check whose condition never holds stops by itself.
+DEFAULT_UNTIL_S = 24 * 3600
+MAX_UNTIL_S = 7 * 86400
+DEFAULT_MAX_FIRES = 20
+
 
 def _xdg_state() -> str:
     return os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
@@ -307,6 +313,9 @@ def _load(force: bool = False) -> dict:
                 "due": float(op.get("due", 0) or 0),
                 "scope": op.get("scope", "any"),
                 "repeat": float(op.get("repeat") or 0),
+                "until": float(op.get("until") or 0),
+                "max_fires": int(op.get("max_fires") or 0),
+                "fires": 0,
                 "created": op.get("at", 0),
                 "status": "done" if rid in done_ids else "pending",
                 "deliveries": 0,
@@ -329,9 +338,14 @@ def _load(force: bool = False) -> dict:
                     # degrades to 24h. The auto-snooze escape hatch is
                     # exempt so it stays terminal.
                     r["deliveries"] = 0
+            elif kind == "budget":
+                # Migration of a repeat armed before budgets existed.
+                r["until"] = float(op.get("until") or 0)
+                r["max_fires"] = int(op.get("max_fires") or 0)
             elif kind == "delivered":
                 if op.get("reset"):
                     r["deliveries"] = 0  # repeating: each cycle starts clean
+                    r["fires"] += 1
                 else:
                     r["deliveries"] += 1
                 r["due"] = float(op.get("next_due", r["due"]) or 0)
@@ -493,8 +507,12 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
         n = r["deliveries"] + 1
         if rep:
             # Recurring / poll-until-true: re-arm one interval out and reset
-            # the nag counter. It never auto-snoozes; only watcher_remove
-            # ends it. This is what a conditional check ("am I home yet?") needs.
+            # the nag counter. It never auto-snoozes; its budget (until,
+            # max_fires) or watcher_remove ends it.
+            until = r.get("until") or 0
+            if until and now > until:
+                _append({"op": "done", "id": r["id"]})
+                continue  # budget expired unfired: nothing to surface
             _append(
                 {
                     "op": "delivered",
@@ -504,6 +522,11 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
                 }
             )
             when = "due now" if late < 60 else f"overdue {_ago(late)}"
+            fires, cap = r.get("fires", 0) + 1, r.get("max_fires") or 0
+            if (cap and fires >= cap) or (until and now + rep > until):
+                _append({"op": "done", "id": r["id"]})
+                lines.append(f"- [{r['id']}] {r['text']}  ({when}; last repeat — budget spent)")
+                continue
             lines.append(f"- [{r['id']}] {r['text']}  ({when}; repeat {_ago(rep)})")
             continue
         if n >= MAX_DELIVERIES:
@@ -525,6 +548,8 @@ def _sweep(ctx, deliver: bool) -> list[dict]:
     # prose here is what made reminders compete with the turn's real answer.
     if lines:
         blocks.insert(0, f"[interrupt:reminders] {len(lines)} due\n" + "\n".join(lines))
+    if not blocks:
+        return due  # only expired repeats: closed, nothing to say
     body = "\n\n".join(blocks)
     try:
         ctx.send_user_message(body, deliver_as="steer")
@@ -564,11 +589,30 @@ and the items, each with its status in italics.\
 @fir_ext.on("session_start")
 def _on_start(params, ctx):
     _load(force=True)
+    _migrate_budgets()
     _start_producers()
     try:
         ctx.prepend(_CONTRACT)
     except Exception:
         pass  # old host without prepend_context: block still degrades to data
+
+
+def _migrate_budgets(now: float | None = None) -> int:
+    """Give every pending repeat armed before budgets a default one, from now
+    (or its next fire, if later). Appends one `budget` op per item; returns
+    how many. Older hosts ignore the op."""
+    now = time.time() if now is None else now
+    n = 0
+    for r in list(_state["recs"].values()):
+        if r["status"] != "pending" or not r.get("repeat") or r.get("until"):
+            continue
+        _append({"op": "budget", "id": r["id"],
+                 "until": int(max(r["due"], now) + DEFAULT_UNTIL_S),
+                 "max_fires": r.get("fires", 0) + DEFAULT_MAX_FIRES})
+        n += 1
+    if n:
+        _load(force=True)
+    return n
 
 
 # NOTE (verified 2026-08-01, remdebug probe): `agent_start` NEVER fires in
@@ -745,14 +789,28 @@ def _add_time(args, ctx):
         rep = sum(int(n) * _MULT[u.lower()] for n, u in _PART.findall(m.group(1)))
         if rep <= 0:
             raise ValueError(f"bad repeat interval: {raw!r}")
-    rid = "r" + uuid.uuid4().hex[:6]
-    _append({"op": "add", "id": rid, "text": str(args["text"]), "due": int(due),
-             "scope": scope, "repeat": rep})
+    op = {"op": "add", "id": "r" + uuid.uuid4().hex[:6], "text": str(args["text"]),
+          "due": int(due), "scope": scope, "repeat": rep}
+    rid = op["id"]
+    if rep:
+        now = time.time()
+        until = parse_due(str(args["until"])) if args.get("until") else now + DEFAULT_UNTIL_S
+        if until > now + MAX_UNTIL_S:
+            raise ValueError("until may be at most 7 days out")
+        if until < due:
+            raise ValueError("until is before the first fire")
+        fires = int(args.get("max_fires") or DEFAULT_MAX_FIRES)
+        if fires <= 0:
+            raise ValueError("max_fires must be positive")
+        op.update(until=int(until), max_fires=fires)
+    _append(op)
     _load(force=True)
     return (
         f"Reminder [{rid}] set for {time.strftime('%Y-%m-%d %H:%M', time.localtime(due))} "
         f"(in {_ago(due - time.time())}), scope={scope}"
-        + (f", repeats every {_ago(rep)}" if rep else "")
+        + (f", repeats every {_ago(rep)} until "
+           f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(op['until']))} or "
+           f"{op['max_fires']} fires" if rep else "")
         + f": {args['text']}"
     )
 
@@ -779,11 +837,16 @@ def _add_time(args, ctx):
                     "'tomorrow 9am', ISO datetime, or epoch seconds."},
             "repeat": {"type": "string",
                        "description": "time: optional repeat interval ('8h', '1d', '30m'). "
-                       "Re-arms this far out each time it fires and NEVER auto-expires — "
-                       "stops only at watcher_remove. Use for recurring nudges and "
-                       "poll-until-true checks where the text tells the future agent what "
-                       "to test (if the condition does not hold, say nothing and let it "
-                       "re-arm). Prefer this over remove+re-add."},
+                       "Re-arms this far out each time it fires, until its budget "
+                       "(`until`, `max_fires`) is spent or watcher_remove. Use for recurring "
+                       "nudges and poll-until-true checks where the text tells the future "
+                       "agent what to test (if the condition does not hold, say nothing and "
+                       "let it re-arm). Prefer this over remove+re-add."},
+            "until": {"type": "string",
+                      "description": "time+repeat: stop repeating after this ('3d', "
+                      "'tomorrow 9am', ISO). Default 24h, at most 7 days."},
+            "max_fires": {"type": "integer",
+                          "description": "time+repeat: stop after this many fires. Default 20."},
             "target": {"type": "string", "description": "dir: absolute directory path."},
             "scope": {"type": "string",
                       "description": "'any' (DEFAULT: fires in the first live session that "
@@ -852,6 +915,9 @@ def watcher_list(args, ctx):
             f"[{r['id']}] time {when} — {r['text']}  "
             f"({r['status']}, scope={r['scope']}"
             + (f", repeats {_ago(r['repeat'])}" if r.get("repeat") else "")
+            + (f", {max(r['max_fires'] - r['fires'], 0)} fires left until "
+               f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(r['until']))}"
+               if r.get("repeat") and r.get("until") else "")
             + f", surfaced {r['deliveries']}x)"
         )
     for w in sorted(_state["watchers"].values(), key=lambda w: w["id"]):

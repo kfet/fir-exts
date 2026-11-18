@@ -425,7 +425,8 @@ out = rem.watcher_add({"kind": "time", "text": "tea", "due": "45m", "repeat": "1
 rid = out.split("[")[1].split("]")[0]
 addop = [json.loads(l) for l in open(rem.STORE) if rid in l][0]
 check("time kind writes legacy add op",
-      set(addop) == {"op", "id", "text", "due", "scope", "repeat", "at"} and addop["op"] == "add"
+      set(addop) == {"op", "id", "text", "due", "scope", "repeat", "at", "until", "max_fires"} and addop["op"] == "add"
+      and addop["max_fires"] == rem.DEFAULT_MAX_FIRES
       and addop["repeat"] == 86400 and addop["scope"] == "any", addop)
 lst = rem.watcher_list({}, Ctx())
 check("watcher_list shows reminder + watcher", rid in lst and wid in lst, lst)
@@ -480,6 +481,57 @@ rem.watcher_remove({"id": wid}, Ctx())
 check("watcher_remove", wid not in rem.watcher_list({}, Ctx()))
 rem._append({"op": "watch", "id": wid, "kind": "dir", "target": W, "host": "hostA"})
 check("unwatch is absorbing", wid not in rem._load(force=True) and wid not in rem._state["watchers"])
+
+
+# ---- budgets on repeats
+reset()
+now = time.time()
+rem._append({"op": "add", "id": "rb", "text": "poll", "due": int(now) - 1, "repeat": 60,
+             "until": int(now + 3600), "max_fires": 2})
+rem._load(force=True)
+ctx = Ctx(); rem._sweep(ctx, deliver=True)
+check("budget: first fire re-arms", rem._load(force=True)["rb"]["status"] == "pending"
+      and rem._state["recs"]["rb"]["fires"] == 1, rem._state["recs"]["rb"])
+rem._append({"op": "snooze", "id": "rb", "due": int(now) - 1, "auto": True})
+rem._load(force=True)
+ctx = Ctx(); rem._sweep(ctx, deliver=True)
+check("budget: last fire ends it", rem._load(force=True)["rb"]["status"] == "done"
+      and "budget spent" in ctx.msgs[0], ctx.msgs)
+reset()
+rem._append({"op": "add", "id": "rx", "text": "old", "due": int(now) - 1, "repeat": 60,
+             "until": int(now) - 5, "max_fires": 5})
+rem._load(force=True)
+ctx = Ctx(); rem._sweep(ctx, deliver=True)
+check("budget: expired repeat ends unfired", rem._load(force=True)["rx"]["status"] == "done" and not ctx.msgs, ctx.msgs)
+reset()
+rem._append({"op": "add", "id": "ru", "text": "near", "due": int(now) - 1, "repeat": 3600,
+             "until": int(now + 60), "max_fires": 9})
+rem._load(force=True)
+ctx = Ctx(); rem._sweep(ctx, deliver=True)
+check("budget: next slot past until ends it", rem._load(force=True)["ru"]["status"] == "done", rem._state["recs"]["ru"])
+
+# migration: a pre-budget repeat gets a default budget, once
+reset()
+rem._append({"op": "add", "id": "rold", "text": "legacy", "due": int(now + 100), "repeat": 600})
+rem._append({"op": "add", "id": "rone", "text": "oneshot", "due": int(now + 100)})
+rem._load(force=True)
+check("migrate: one budget op", rem._migrate_budgets(now=now) == 1)
+r = rem._state["recs"]["rold"]
+check("migrate: defaults", r["until"] == int(now + 100 + rem.DEFAULT_UNTIL_S) and r["max_fires"] == rem.DEFAULT_MAX_FIRES, r)
+check("migrate: idempotent", rem._migrate_budgets(now=now) == 0)
+check("migrate: one-shot untouched", not rem._state["recs"]["rone"]["until"])
+
+# watcher_add budget args
+out = rem.watcher_add({"kind": "time", "text": "t", "due": "10m", "repeat": "10m", "until": "2h", "max_fires": 3}, Ctx())
+check("add: explicit budget", "3 fires" in out, out)
+for bad, args in {"until>7d": {"until": "8d"}, "until<due": {"until": "5m"}, "fires<0": {"max_fires": -1}}.items():
+    try:
+        rem.watcher_add({"kind": "time", "text": "t", "due": "10m", "repeat": "10m", **args}, Ctx())
+        check("add: rejects " + bad, False)
+    except ValueError:
+        check("add: rejects " + bad, True)
+lst = rem.watcher_list({}, Ctx())
+check("list shows budget", "fires left until" in lst, lst)
 
 
 print()
